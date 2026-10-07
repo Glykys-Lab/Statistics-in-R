@@ -1,0 +1,8 @@
+.R-library/
+.Rhistory
+.RData
+.Rproj.user/
+artifacts/
+.cache/
+app_cache/
+*.log

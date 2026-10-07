@@ -1,0 +1,25 @@
+"subject","group","response"
+"S01","Control",9.1
+"S02","Control",10.4
+"S03","Control",8.8
+"S04","Control",11.2
+"S05","Control",9.8
+"S06","Control",10.1
+"S07","Control",8.9
+"S08","Control",11.7
+"S01","Drug A",12.1
+"S02","Drug A",14.2
+"S03","Drug A",11.9
+"S04","Drug A",15.8
+"S05","Drug A",13.7
+"S06","Drug A",14.9
+"S07","Drug A",12.5
+"S08","Drug A",15.1
+"S01","Drug B",15.4
+"S02","Drug B",17.2
+"S03","Drug B",14.8
+"S04","Drug B",18.6
+"S05","Drug B",16.9
+"S06","Drug B",18.2
+"S07","Drug B",15.6
+"S08","Drug B",19.1
