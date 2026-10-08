@@ -83,7 +83,38 @@ shiny::testServer(app_env$server, {
   session$setInputs(cell_edit = list(row = 1, column = 1, value = "Changed ID", revision = sheet_revision(), nonce = 7))
   session$setInputs(project_open = list(kind = "analyses", key = outlier_snapshot, nonce = 5), save_cleaned = 1)
   stopifnot(is.na(raw_data()$Control[1]), raw_data()$Subject[1] == "S01", nrow(raw_data()) == 8)
+  # Check the rendered highlight in both places that show the same sheet.
+  expect_selection <- function(kind, id, family = TRUE) {
+    pattern <- paste0('class="project-link selected" data-kind="', kind, '" data-key="', id, '" aria-pressed="true"')
+    tree <- output$project_tree$html
+    stopifnot(grepl(pattern, tree, fixed = TRUE),
+      length(gregexpr('class="project-link selected"', tree, fixed = TRUE)[[1]]) == 1L)
+    if (family) {
+      related <- output$family_tree$html
+      stopifnot(grepl(pattern, related, fixed = TRUE),
+        length(gregexpr('class="project-link selected"', related, fixed = TRUE)[[1]]) == 1L)
+    }
+  }
+  for (kind in c("tables", "analyses", "graphs")) {
+    id <- switch(kind, tables = first_table, analyses = first_analysis,
+      graphs = names(Filter(function(g) g$analysis_id == first_analysis, project()$graphs))[1])
+    session$setInputs(project_open = list(kind = kind, key = id, nonce = paste0("highlight-", kind)))
+    expect_selection(kind, id)
+  }
+  other_graph <- names(Filter(function(g) g$analysis_id == first_analysis, project()$graphs))[2]
+  session$setInputs(project_open = list(kind = "graphs", key = other_graph, nonce = "highlight-next-graph"))
+  expect_selection("graphs", other_graph)
+  session$setInputs(project_search = "QQ")
+  expect_selection("graphs", other_graph)
+  session$setInputs(project_search = "", project_open = list(kind = "layouts", key = names(project()$layouts)[1], nonce = "highlight-layout"))
+  expect_selection("layouts", names(project()$layouts)[1], family = FALSE)
+  session$setInputs(project_open = list(kind = "info", key = "info", nonce = "highlight-info"))
+  expect_selection("info", "info", family = FALSE)
+  cat("PASS: Navigator and Family highlight the selected table, result or graph; graph switching, search, layouts and information retain the correct selection\n")
   cat("PASS: Server workflows: editing, stale results, invalid edits, missing-data mixed model, XY and paste\n")
   cat("PASS: Analyze is blocked for unchanged inputs, allows relevant changes, and preserves archived-result browsing\n")
   cat("PASS: Project workflows: saved snapshots, normalization, lognormal models, graphs, overlays and JSON reopening\n")
 })
+source("tests/upload_tests.R")
+source("tests/option_server_tests.R")
+source("tests/refresh_tests.R")

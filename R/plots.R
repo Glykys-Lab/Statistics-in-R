@@ -13,6 +13,7 @@ make_plot <- function(result, style = "points", error = "ci", title = "", x_labe
     labels <- if (is.null(f$strata)) rep(levels(d$group)[1], length(f$time)) else rep(sub("^group=", "", names(f$strata)), f$strata)
     curve <- data.frame(x = f$time, y = f$surv, group = labels, censored = f$n.censor)
     curve <- rbind(data.frame(x = 0, y = 1, group = unique(labels), censored = 0), curve)
+    curve$group <- factor(curve$group, levels = levels(d$group))
     curve <- curve[order(curve$group, curve$x), ]
     p <- ggplot2::ggplot(curve, ggplot2::aes(x, y, color = group)) + ggplot2::geom_step(linewidth = .9) +
       ggplot2::geom_point(data = curve[curve$censored > 0, ], shape = 3, size = 2.8) +
@@ -77,10 +78,63 @@ make_plot <- function(result, style = "points", error = "ci", title = "", x_labe
 }
 
 diagnostic_plot <- function(result) {
-  if (is.null(result$fit) || !result$method %in% c("anova", "two_way", "linear", "dose", "rm_anova", "mixed", "log_rm_anova", "log_mixed")) return(NULL)
-  d <- data.frame(fitted = fitted(result$fit), residual = residuals(result$fit))
+  d <- residual_frame(result)
+  if (is.null(d)) return(NULL)
   ggplot2::ggplot(d, ggplot2::aes(fitted, residual)) + ggplot2::geom_hline(yintercept = 0, color = "#A0ADAF", linetype = 2) +
     ggplot2::geom_point(color = "#007F83", size = 2.5) + ggplot2::theme_classic(base_size = 13) + ggplot2::labs(x = "Fitted response", y = "Residual", title = "Residuals vs fitted values")
+}
+
+residual_graph <- function(result, kind) {
+  d <- residual_frame(result)
+  assert(!is.null(d), "Residual graphs are unavailable for this analysis.")
+  if (kind == "residual") return(diagnostic_plot(result))
+  if (kind == "homoscedasticity") {
+    p <- ggplot2::ggplot(d, ggplot2::aes(fitted, abs(residual), color = group)) + ggplot2::geom_point(size = 2.5) +
+      ggplot2::labs(x = "Fitted response", y = "Absolute residual", title = "Homoscedasticity plot", color = NULL)
+  } else if (kind == "residual_qq") {
+    x <- sort(d$residual)
+    assert(length(x) >= 2 && sd(x) > 0, "Residual QQ plots require varying residuals.")
+    z <- data.frame(actual = x, predicted = mean(x) + sd(x)*qnorm(ppoints(length(x))))
+    p <- ggplot2::ggplot(z, ggplot2::aes(actual, predicted)) + ggplot2::geom_abline(slope = 1, intercept = 0, linetype = 2, color = "#69788a") +
+      ggplot2::geom_point(color = "#2467ae", size = 2.5) + ggplot2::labs(x = "Actual residual", y = "Predicted normal residual", title = "Residual QQ plot")
+  } else {
+    subjects <- unique(d$subject)
+    d$subject <- factor(d$subject, levels = rev(subjects))
+    # Limit labels, not tiles, so large tables remain readable at app height.
+    row_labels <- if (length(subjects) <= 10L) subjects else subjects[unique(round(seq(1, length(subjects), length.out = 10L)))]
+    p <- ggplot2::ggplot(d, ggplot2::aes(group, subject, fill = residual)) + ggplot2::geom_tile(color = "white", linewidth = .2) +
+      ggplot2::scale_y_discrete(breaks = row_labels) +
+      ggplot2::scale_fill_gradient2(low = "#2467ae", mid = "white", high = "#b94040", midpoint = 0) +
+      ggplot2::labs(x = "Condition", y = if ("id" %in% names(result$data)) "Subject" else "Observation within group", title = "Residual heatmap", fill = "Residual")
+  }
+  p + ggplot2::theme_classic(base_size = 13)
+}
+
+rank_graph <- function(result) {
+  assert(result$method %in% c("kruskal", "friedman", "mann_whitney", "paired_wilcox"), "Rank graphs require a nonparametric analysis.")
+  d <- result$data
+  d$rank <- if ("id" %in% names(d)) ave(d$y, d$id, FUN = rank) else rank(d$y)
+  ggplot2::ggplot(d, ggplot2::aes(group, rank, color = group)) + ggplot2::geom_point(position = ggplot2::position_jitter(width = .07, height = 0, seed = 42), alpha = .75, size = 2.5) +
+    ggplot2::stat_summary(fun = mean, geom = "point", shape = 95, size = 8, color = "#25364a") + ggplot2::theme_classic(base_size = 13) +
+    ggplot2::labs(x = "Condition", y = "Rank", color = NULL, title = "Ranks by condition", caption = if ("id" %in% names(d)) "Ranks calculated within each subject; horizontal marks show mean ranks." else "Ranks calculated across all selected observations; horizontal marks show mean ranks.")
+}
+
+difference_graph <- function(result) {
+  d <- result$data; assert("id" %in% names(d), "Difference graphs require matched subject IDs.")
+  cfg <- result$config
+  if (cfg$comparisons %in% c("none", "trend")) cfg$comparisons <- "all"
+  pairs <- comparison_pairs(levels(d$group), cfg)
+  values <- lapply(pairs, function(p) {
+    a <- d[d$group == p[1], ]; b <- d[d$group == p[2], ]; ids <- intersect(as.character(a$id), as.character(b$id))
+    data.frame(subject = ids, difference = a$y[match(ids, a$id)] - b$y[match(ids, b$id)], comparison = rep(paste(p, collapse = " minus "), length(ids)))
+  })
+  z <- do.call(rbind, values); assert(!is.null(z) && nrow(z) > 0, "No overlapping subject measurements for the difference graph.")
+  z$comparison <- factor(z$comparison, levels = unique(z$comparison))
+  ggplot2::ggplot(z, ggplot2::aes(comparison, difference, color = comparison)) + ggplot2::geom_hline(yintercept = 0, color = "#69788a", linetype = 2) +
+    ggplot2::geom_point(position = ggplot2::position_jitter(width = .07, height = 0, seed = 42), size = 2.5, alpha = .8) +
+    ggplot2::stat_summary(fun = mean, geom = "point", shape = 95, size = 8, color = "#25364a") + ggplot2::theme_classic(base_size = 13) +
+    ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 30, hjust = 1), legend.position = "none") +
+    ggplot2::labs(x = NULL, y = if (cfg$scale == "log") "Within-subject log difference" else "Within-subject difference", title = "Matched differences", caption = "Each point is a subject with both measurements; horizontal marks show means.")
 }
 
 normality_plot <- function(result) {
@@ -101,6 +155,7 @@ normality_plot <- function(result) {
     }))
   } else samples <- data.frame(value = d$y, sample = d$group)
   if (is.null(samples) || !nrow(samples)) return(NULL)
+  if (!is.factor(samples$sample)) samples$sample <- factor(samples$sample, levels = unique(samples$sample))
   ggplot2::ggplot(samples, ggplot2::aes(sample = value)) + ggplot2::stat_qq(color = "#007F83") +
     ggplot2::stat_qq_line(color = "#829399") + ggplot2::facet_wrap(~sample, scales = "free") +
     ggplot2::theme_classic(base_size = 12) + ggplot2::labs(x = "Normal theoretical quantile", y = "Observed quantile", title = "Normal QQ plots")
@@ -126,6 +181,7 @@ distribution_qq_plot <- function(result, lognormal = FALSE, title = "", palette_
   valid <- !vapply(points, is.null, logical(1)); skipped <- names(points)[!valid]
   assert(any(valid), if (lognormal) "No varying, strictly positive column is available for the lognormal QQ plot." else "No varying column has enough values for a QQ plot.")
   p <- do.call(rbind, lapply(names(points)[valid], function(g) { z <- points[[g]]; z$group <- g; z }))
+  p$group <- factor(p$group, levels = names(points)[valid])
   colors <- if (palette_name == "mono") c("#202020", "#999999") else if (palette_name == "prism") c("#202020", "#2478B5", "#F28E2B", "#BD35DD") else c("#007F83", "#E8914A", "#576CC0", "#C35B83")
   plot <- ggplot2::ggplot(p, ggplot2::aes(actual, predicted, color = group)) + ggplot2::geom_abline(slope = 1, intercept = 0, color = "#D45A5A", linetype = 3)
   plot <- plot + if (varied_symbols) ggplot2::geom_point(ggplot2::aes(shape = group), size = point_size, alpha = .7) else ggplot2::geom_point(shape = as.numeric(symbol), size = point_size, alpha = .7)
@@ -159,14 +215,15 @@ comparison_plot <- function(result, title = "", x_label = "", y_label = "", poin
 }
 
 graph_kinds <- c("Data graph" = "raw", "Normal QQ (columns)" = "normal_qq", "Lognormal QQ (columns)" = "lognormal_qq",
-  "Multiple-comparison intervals" = "comparison", "Residual diagnostic" = "residual", "Assumption QQ (differences / residuals)" = "assumption_qq")
+  "Multiple-comparison intervals" = "comparison", "Residual diagnostic" = "residual", "Assumption QQ (differences / residuals)" = "assumption_qq",
+  "Homoscedasticity" = "homoscedasticity", "Residual QQ" = "residual_qq", "Residual heatmap" = "residual_heatmap", "Ranks" = "ranks", "Matched differences" = "differences")
 
 make_graph <- function(result, kind = "raw", options = list()) {
   assert(kind %in% graph_kinds, "Unknown graph type.")
   if (kind == "raw") return(do.call(make_plot, c(list(result = result), options)))
   if (kind == "comparison") return(do.call(comparison_plot, c(list(result = result), options)))
   if (kind %in% c("normal_qq", "lognormal_qq")) return(do.call(distribution_qq_plot, c(list(result = result, lognormal = kind == "lognormal_qq"), options)))
-  plot <- if (kind == "residual") diagnostic_plot(result) else normality_plot(result)
+  plot <- if (kind %in% c("residual", "homoscedasticity", "residual_qq", "residual_heatmap")) residual_graph(result, kind) else if (kind == "ranks") rank_graph(result) else if (kind == "differences") difference_graph(result) else normality_plot(result)
   assert(!is.null(plot), "This analysis has no graph of the selected type.")
   if (!is.null(options$title) && nzchar(options$title)) plot <- plot + ggplot2::labs(title = options$title)
   plot

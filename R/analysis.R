@@ -1,13 +1,17 @@
 # LabStats analysis engine. This file can be sourced without starting the GUI.
+if (file.exists("R/options.R")) source("R/options.R", local = TRUE)
+if (file.exists("R/results.R")) source("R/results.R", local = TRUE)
 analysis_methods <- c(
   "Descriptive statistics" = "summary", "Unpaired t test (Welch)" = "welch",
   "Unpaired t test (equal variance)" = "student", "Paired t test" = "paired_t",
   "Mann-Whitney test" = "mann_whitney", "Wilcoxon matched-pairs test" = "paired_wilcox",
   "One-way ANOVA" = "anova", "Welch one-way ANOVA" = "welch_anova",
-  "Kruskal-Wallis + pairwise Wilcoxon" = "kruskal",
+  "Kruskal-Wallis" = "kruskal",
   "Friedman repeated-measures test" = "friedman",
   "Repeated-measures one-way ANOVA" = "rm_anova",
   "Mixed-effects model (REML)" = "mixed",
+  "Automatic repeated ANOVA / mixed effects" = "rm_auto",
+  "Automatic lognormal repeated ANOVA / mixed effects" = "log_rm_auto",
   "Lognormal repeated-measures ANOVA" = "log_rm_anova",
   "Lognormal mixed-effects model (REML)" = "log_mixed",
   "Normality and lognormality tests" = "normality",
@@ -20,18 +24,20 @@ analysis_methods <- c(
 )
 
 method_note <- function(method) switch(method,
+  rm_auto = "Use repeated-measures ANOVA when all subjects have every selected condition; otherwise use REML mixed effects with the available observations.",
+  log_rm_auto = "Choose repeated ANOVA or REML mixed effects based on completeness, using natural-log responses and geometric-mean comparisons.",
   summary = "Mean, SD, SEM, median, quartiles, and a t-based confidence interval for each group mean. Each row should represent an independent experimental unit.",
-  welch = "Two independent groups. Welch's t test allows unequal variances. The estimate is the first group minus the second (alphabetical group order).",
+  welch = "Two independent groups. Welch's t test allows unequal variances. The estimate is the first group minus the second in table order.",
   student = "Two independent groups with a scientifically justified equal-variance assumption. Consider Welch's test otherwise.",
   paired_t = "Two conditions on matched subjects. Pairs are matched by subject ID, never by row order. Incomplete pairs are excluded and reported. The t assumption applies to within-pair differences.",
   mann_whitney = "Two independent groups; tests a distributional shift. A median-shift interpretation requires similarly shaped distributions. Uses a normal approximation with continuity correction.",
   paired_wilcox = "Two matched conditions. The signed-rank test assumes symmetric within-pair differences. Uses a normal approximation with continuity correction.",
-  anova = "Independent groups, approximately normal residuals, common variance. Choose Tukey for all-pairs comparisons, or the selected correction for all-pairs or control comparisons. Sidak and Bonferroni supply adjusted intervals; Holm and BH supply unadjusted intervals with adjusted p-values.",
+  anova = "Independent groups, approximately normal residuals, common variance. Follow-ups can compare all pairs, a control, selected pairs, or linear trend. Tukey supplies all-pairs comparisons. Sidak and Bonferroni supply adjusted intervals; other p-value corrections leave intervals unadjusted.",
   welch_anova = "Independent groups, unequal variances allowed. Pairwise Welch tests use the selected p-value adjustment. No equal-variance pooling.",
-  kruskal = "Independent groups. Omnibus Kruskal-Wallis followed by pairwise Wilcoxon rank-sum tests with the selected adjustment; these are not Dunn tests.",
-  friedman = "Matched subjects measured once in every condition. Only complete subjects are used; duplicate subject-condition records are rejected. No post-hoc tests are supplied.",
-  rm_anova = "One within-subject factor, complete subjects only. Geisser-Greenhouse correction is available. Comparisons use paired differences when sphericity is not assumed, or pooled repeated-measures error when it is assumed. Selected all-pairs or control comparisons form one correction family.",
-  mixed = "REML condition effect with a subject random intercept and common residual variance; available observations are retained. GG epsilon uses observed subject covariance (complete data) or an EM estimate of unstructured covariance (missing data). Includes comparisons and a matching likelihood-ratio diagnostic. Missingness must be ignorable. Exact Prism equivalence is unverified.",
+  kruskal = "Independent groups. Omnibus Kruskal-Wallis with optional Dunn rank comparisons or pairwise Wilcoxon rank-sum tests, using the selected comparison family and correction.",
+  friedman = "Matched subjects measured once in every condition. Only complete subjects are used; duplicate subject-condition records are rejected. Optional follow-ups use tie-corrected Dunn rank comparisons or paired Wilcoxon tests.",
+  rm_anova = "One within-subject factor, complete subjects only. Geisser-Greenhouse correction is available. Comparisons use paired differences when sphericity is not assumed, or pooled repeated-measures error when it is assumed. All-pairs, control or selected pairs form one correction family; linear trend requires sphericity assumed.",
+  mixed = "REML condition effect with compound symmetry and common residual variance; available observations are retained. Choose removal of a nonpositive subject component, a signed covariance component, or a nonnegative random intercept. GG epsilon uses complete subject covariance or an observed-data EM estimate with missing measurements. Missingness must be ignorable. Exact Prism equivalence is unverified.",
   log_rm_anova = "Repeated-measures ANOVA on natural-log responses, with GG correction and comparisons reported as geometric-mean ratios. All observed responses must be positive. Complete subjects only.",
   log_mixed = "REML repeated mixed model on natural-log responses. Includes GG correction, matching diagnostic and geometric-mean ratio comparisons. All observed responses must be positive. Available observations are retained.",
   normality = "Test each column for Gaussian and lognormal distributions using Shapiro-Wilk and D'Agostino-Pearson. Lognormal tests use natural logarithms and are unavailable if any observed value is nonpositive. A non-rejection does not prove the assumed distribution.",
@@ -55,15 +61,17 @@ numeric_column <- function(data, name) {
 group_column <- function(data, name) {
   assert(length(name) == 1L && name %in% names(data), "Select a valid group/category column.")
   x <- trimws(as.character(data[[name]])); x[x == ""] <- NA_character_
-  factor(x, levels = sort(unique(x[!is.na(x)])))
+  order <- if (is.factor(data[[name]])) trimws(levels(data[[name]])) else unique(x)
+  factor(x, levels = unique(order[!is.na(order) & nzchar(order)]))
 }
 summary_table <- function(y, group, confidence = .95) {
   do.call(rbind, lapply(split(y, group, drop = TRUE), function(x) {
+    missing <- sum(is.na(x)); x <- x[!is.na(x)]
     n <- length(x); se <- if (n > 1) sd(x)/sqrt(n) else NA_real_
     margin <- if (n > 1) qt((1 + confidence)/2, n - 1) * se else NA_real_
-    data.frame(n = n, mean = mean(x), sd = sd(x), sem = se, median = median(x),
-               q1 = unname(quantile(x, .25)), q3 = unname(quantile(x, .75)),
-               ci_low = mean(x) - margin, ci_high = mean(x) + margin)
+    data.frame(n = n, missing = missing, minimum = if (n) min(x) else NA_real_, maximum = if (n) max(x) else NA_real_, mean = if (n) mean(x) else NA_real_, sd = sd(x), sem = se, median = median(x),
+               q1 = if (n) unname(quantile(x, .25)) else NA_real_, q3 = if (n) unname(quantile(x, .75)) else NA_real_,
+               ci_low = if (n) mean(x) - margin else NA_real_, ci_high = if (n) mean(x) + margin else NA_real_)
   })) |> (function(x) data.frame(group = rownames(x), x, row.names = NULL))()
 }
 htest_table <- function(test) {
@@ -85,12 +93,12 @@ design_methods <- function(table_type = "column", family = "many", matched = FAL
   if (table_type == "xy") return(analysis_methods[analysis_methods %in% c("linear", "pearson", "spearman")])
   if (table_type == "other") return(analysis_methods)
   if (family %in% c("normality", "outliers")) return(analysis_methods[analysis_methods == family])
-  if (distribution == "lognormal" && matched && family == "many") return(analysis_methods[analysis_methods == if (repeated == "mixed") "log_mixed" else "log_rm_anova"])
+  if (distribution == "lognormal" && matched && family == "many") return(analysis_methods[analysis_methods == switch(repeated, mixed = "log_mixed", auto = "log_rm_auto", "log_rm_anova")])
   method <- if (family == "summary") "summary" else if (family == "two") {
     if (matched) { if (distribution == "normal") "paired_t" else "paired_wilcox" }
     else if (distribution == "rank") "mann_whitney" else if (variance == "equal") "student" else "welch"
   } else if (matched) {
-    if (distribution == "rank") "friedman" else if (repeated == "mixed") "mixed" else "rm_anova"
+    if (distribution == "rank") "friedman" else switch(repeated, mixed = "mixed", auto = "rm_auto", "rm_anova")
   } else if (distribution == "rank") "kruskal" else if (variance == "equal") "anova" else "welch_anova"
   analysis_methods[analysis_methods == method]
 }
@@ -194,22 +202,23 @@ annotate_table <- function(table, alpha = .05) {
 }
 
 mean_comparisons <- function(d, cfg, kind = "paired", fit = NULL) {
-  groups <- levels(d$group); pairs <- combn(groups, 2, simplify = FALSE)
-  if (cfg$comparisons == "control") {
-    assert(length(cfg$control) == 1 && cfg$control %in% groups, "Select a valid control group.")
-    pairs <- lapply(setdiff(groups, cfg$control), function(g) c(cfg$control, g))
-  }
+  groups <- levels(d$group); pairs <- comparison_pairs(groups, cfg)
+  if (!length(pairs)) return(NULL)
   m <- length(pairs)
   tail <- (1 - cfg$confidence)/2
   adjusted_tail <- if (cfg$adjustment == "sidak") -expm1(log(cfg$confidence)/m)/2 else if (cfg$adjustment == "bonferroni") tail/m else tail
   output <- lapply(pairs, function(p) {
     a <- d[d$group == p[1], , drop = FALSE]; b <- d[d$group == p[2], , drop = FALSE]
-    status <- "OK"; estimate <- se <- df <- NA_real_; n_pairs <- NA_integer_
+    status <- "OK"; estimate <- se <- df <- mean_1 <- mean_2 <- NA_real_; n_pairs <- NA_integer_
+    n1 <- nrow(a); n2 <- nrow(b); mean_type <- "Observed"
     if (kind == "paired") {
       ids <- intersect(as.character(a$id), as.character(b$id))
-      delta <- a$y[match(ids, a$id)] - b$y[match(ids, b$id)]
+      values_1 <- a$y[match(ids, a$id)]; values_2 <- b$y[match(ids, b$id)]
+      delta <- values_1 - values_2
+      mean_1 <- mean(values_1); mean_2 <- mean(values_2); n1 <- n2 <- length(ids)
       n_pairs <- length(delta); estimate <- mean(delta); se <- sd(delta)/sqrt(n_pairs); df <- n_pairs - 1
     } else if (kind %in% c("welch", "ordinary", "rm_pooled")) {
+      mean_1 <- mean(a$y); mean_2 <- mean(b$y)
       estimate <- mean(a$y) - mean(b$y)
       if (kind == "welch") {
         v1 <- var(a$y)/nrow(a); v2 <- var(b$y)/nrow(b)
@@ -219,20 +228,22 @@ mean_comparisons <- function(d, cfg, kind = "paired", fit = NULL) {
         if (kind == "rm_pooled") n_pairs <- nrow(a)
       }
     } else {
+      mean_type <- "Predicted (LS)"
       pair_d <- droplevels(d[d$group %in% p, , drop = FALSE])
       pair_fit <- fit
       if (kind == "mixed_pairs") {
         coverage <- table(pair_d$id, pair_d$group); n_pairs <- sum(rowSums(coverage) == 2)
         if (n_pairs < 2 || nrow(pair_d) <= nlevels(pair_d$id) + 1) status <- "Unavailable: insufficient overlap for this pair"
-        else pair_fit <- tryCatch(nlme::lme(y ~ group, random = ~1 | id, data = pair_d, method = "REML", na.action = na.fail), error = function(e) NULL)
+        else pair_fit <- tryCatch(fit_mixed_options(pair_d, cfg), error = function(e) NULL)
         if (is.null(pair_fit)) status <- "Unavailable: pairwise model did not converge"
       }
       if (status == "OK") {
         lev <- levels(pair_fit$data$group)
         design <- model.matrix(~group, data.frame(group = factor(p, levels = lev)))
         contrast <- design[1, ] - design[2, ]
-        estimate <- as.numeric(contrast %*% nlme::fixef(pair_fit)); se <- sqrt(as.numeric(contrast %*% vcov(pair_fit) %*% contrast))
-        df <- min(summary(pair_fit)$tTable[contrast != 0, "DF"])
+        predicted <- as.numeric(design %*% mixed_beta(pair_fit)); mean_1 <- predicted[1]; mean_2 <- predicted[2]
+        estimate <- as.numeric(contrast %*% mixed_beta(pair_fit)); se <- sqrt(as.numeric(contrast %*% vcov(pair_fit) %*% contrast))
+        df <- min(mixed_coefficients(pair_fit)[contrast != 0, "DF"])
       }
     }
     if (!is.finite(se) || se <= 0 || !is.finite(df) || df <= 0) status <- if (status == "OK") "Unavailable: no estimable comparison error" else status
@@ -240,12 +251,13 @@ mean_comparisons <- function(d, cfg, kind = "paired", fit = NULL) {
     probability <- if (status == "OK") 2*pt(-abs(test), df) else NA_real_
     margin <- if (status == "OK") qt(1 - adjusted_tail, df)*se else NA_real_
     data.frame(group_1 = p[1], group_2 = p[2], contrast = paste(p, collapse = " minus "), estimate = estimate,
+      mean_1 = mean_1, mean_2 = mean_2, mean_type = mean_type, n1 = n1, n2 = n2,
       se = se, df = df, n_pairs = n_pairs, statistic = test, p_value = probability, ci_low = estimate - margin, ci_high = estimate + margin,
       interval = if (cfg$adjustment %in% c("sidak", "bonferroni")) paste(cfg$confidence*100, "% simultaneous", cfg$adjustment) else paste(cfg$confidence*100, "% unadjusted"), status = status)
   })
   result <- do.call(rbind, output)
   # Preserve family size including unavailable contrasts rather than shrinking it.
-  result$adjusted_p_value <- if (cfg$adjustment == "sidak") -expm1(m*log1p(-result$p_value)) else p.adjust(result$p_value, cfg$adjustment, n = m)
+  result$adjusted_p_value <- adjust_family(result$p_value, cfg$adjustment, n = m)
   if (cfg$scale == "log") {
     result$geometric_mean_ratio <- exp(result$estimate); result$ratio_ci_low <- exp(result$ci_low); result$ratio_ci_high <- exp(result$ci_high)
   }
@@ -342,9 +354,27 @@ rout_column <- function(x, q = .01, tolerance = 1e-9, maxiter = 1000L) {
 run_analysis <- function(data, config) {
   defaults <- list(method = "summary", y = NULL, group = NULL, x = NULL, id = NULL,
     factor2 = NULL, event = NULL, count = NULL, confidence = .95, adjustment = "holm", direction = "decreasing", sphericity = "gg",
-    alpha = .05, comparisons = "all", control = NULL, scale = "raw", rout_q = .01)
+    alpha = .05, comparisons = "all", control = NULL, scale = "raw", rout_q = .01,
+    selected_pairs = character(), reverse_comparisons = FALSE, fdr_q = .05, rank_test = "wilcox",
+    random_effect = "keep", glm_initial = TRUE, report_adjusted_p = TRUE, report_descriptive = TRUE,
+    report_goodness = FALSE, report_effects = FALSE, report_aicc = FALSE,
+    residual_normality = FALSE, residual_variance = FALSE, diagnostic_graphs = character())
   if (identical(config$method, "anova")) defaults$adjustment <- "tukey"
   cfg <- modifyList(defaults, config)
+  cfg$selected_pairs <- as.character(unlist(cfg$selected_pairs))
+  cfg$diagnostic_graphs <- as.character(unlist(cfg$diagnostic_graphs))
+  if (cfg$method %in% c("rm_auto", "log_rm_auto")) {
+    group <- group_column(data, cfg$group); id <- group_column(data, cfg$id); y <- numeric_column(data, cfg$y)
+    coverage <- table(id, group)
+    incomplete <- anyNA(y) || anyNA(id) || anyNA(group) || any(coverage != 1)
+    requested <- cfg$method
+    cfg$method <- if (requested == "log_rm_auto") if (incomplete) "log_mixed" else "log_rm_anova" else if (incomplete) "mixed" else "rm_anova"
+    result <- run_analysis(data, cfg)
+    result$config$requested_method <- requested
+    result$notes <- c(paste("Automatic selection:", names(analysis_methods)[match(result$method, analysis_methods)],
+      if (incomplete) "because selected measurements are incomplete." else "because every subject has every selected condition."), result$notes)
+    return(result)
+  }
   if (cfg$method %in% c("log_rm_anova", "log_mixed")) {
     original <- cfg$method
     cfg$method <- if (original == "log_rm_anova") "rm_anova" else "mixed"; cfg$scale <- "log"
@@ -356,11 +386,17 @@ run_analysis <- function(data, config) {
   assert(!anyDuplicated(names(data)), "Column names must be unique.")
   assert(cfg$method %in% analysis_methods, "Unknown analysis method.")
   assert(is.numeric(cfg$confidence) && length(cfg$confidence) == 1 && is.finite(cfg$confidence) && cfg$confidence > 0 && cfg$confidence < 1, "Confidence level must lie between 0 and 1.")
-  assert(cfg$adjustment %in% c("holm", "bonferroni", "BH", "none", "sidak", "tukey"), "Unknown multiple-comparison adjustment.")
+  assert(cfg$adjustment %in% c("holm", "holm_sidak", "bonferroni", "BH", "BY", "BKY", "none", "sidak", "tukey"), "Unknown multiple-comparison adjustment.")
   assert(cfg$adjustment != "tukey" || cfg$method == "anova", "Tukey comparisons require ordinary one-way ANOVA.")
   assert(cfg$sphericity %in% c("gg", "none"), "Unknown sphericity setting.")
   assert(length(cfg$alpha) == 1 && is.finite(cfg$alpha) && cfg$alpha > 0 && cfg$alpha < 1, "Alpha must lie between 0 and 1.")
-  assert(cfg$comparisons %in% c("all", "control"), "Choose all-pairs or control comparisons.")
+  assert(cfg$comparisons %in% c("all", "control", "none", "selected", "trend"), "Choose a valid comparison family.")
+  assert(cfg$random_effect %in% c("keep", "remove", "full"), "Choose a valid random-effect policy.")
+  assert(cfg$rank_test %in% c("dunn", "wilcox"), "Choose Dunn or pairwise Wilcoxon rank comparisons.")
+  assert(length(cfg$fdr_q) == 1 && is.finite(cfg$fdr_q) && cfg$fdr_q > 0 && cfg$fdr_q < 1, "Target FDR must lie between 0 and 1.")
+  assert(cfg$comparisons != "trend" || cfg$method %in% c("anova", "rm_anova", "mixed"), "Linear trend requires parametric one-way analysis.")
+  assert(cfg$comparisons != "trend" || cfg$method == "anova" || cfg$sphericity == "none", "Linear trend requires sphericity assumed for repeated data.")
+  assert(all(cfg$diagnostic_graphs %in% c("residual", "homoscedasticity", "residual_qq", "residual_heatmap", "comparison", "ranks", "differences")), "Choose valid diagnostic graphs.")
   assert(cfg$scale %in% c("raw", "log"), "Unknown response scale.")
   method <- cfg$method
   notes <- method_note(method); warnings <- character(); tables <- list(); fit <- NULL
@@ -396,6 +432,14 @@ run_analysis <- function(data, config) {
       assert(!anyDuplicated(keys), "Duplicate subject-condition records found. Aggregate technical replicates before analysis.")
     }
     original_groups <- if ("group" %in% names(d)) levels(d$group) else NULL
+    if ("y" %in% names(d) && "group" %in% names(d) && method != "survival") {
+      tables$descriptive_statistics <<- summary_table(d$y, d$group, cfg$confidence)
+      subjects <- if ("id" %in% names(d)) unique(as.character(d$id[!is.na(d$id)])) else character()
+      if (length(subjects) && !anyNA(d$id)) tables$descriptive_statistics$missing <<- length(subjects) - tables$descriptive_statistics$n
+      missing_values <- sum(is.na(d$y) & !is.na(d$group))
+      if (length(subjects)) missing_values <- length(subjects)*length(original_groups) - sum(complete.cases(d[, c("y", "group", "id")]))
+      tables$data_summary <<- data.frame(treatments = length(original_groups), subjects = if (length(subjects)) length(subjects) else NA_integer_, missing_values = missing_values)
+    }
     column_values <- if ("y" %in% names(d) && "group" %in% names(d) && method != "survival") d[!is.na(d$y) & !is.na(d$group), c("y", "group"), drop = FALSE] else NULL
     missing_rows <- sum(!complete.cases(d)); d <- droplevels(d[complete.cases(d), , drop = FALSE])
     assert(nrow(d) > 0, "No complete observations remain in the selected columns.")
@@ -478,10 +522,25 @@ run_analysis <- function(data, config) {
     if (method == "anova") {
       fit <<- aov(y ~ group, data = d)
       a <- as.data.frame(summary(fit)[[1]]); tables$anova <<- data.frame(term = trimws(rownames(a)), a, row.names = NULL, check.names = FALSE)
-      if (cfg$adjustment == "tukey") {
+      if (cfg$adjustment == "tukey" && cfg$comparisons != "none") {
         assert(cfg$comparisons == "all", "Tukey supplies all pairwise comparisons. Select Sidak or another correction for control comparisons.")
         p <- as.data.frame(TukeyHSD(fit, conf.level = cfg$confidence)$group)
         tables$posthoc <<- data.frame(contrast = rownames(p), p, row.names = NULL, check.names = FALSE)
+        if (isTRUE(cfg$reverse_comparisons)) {
+          tables$posthoc$diff <<- -tables$posthoc$diff
+          low <- tables$posthoc$lwr; tables$posthoc$lwr <<- -tables$posthoc$upr; tables$posthoc$upr <<- -low
+          pair_names <- combn(levels(d$group), 2, simplify = FALSE)
+          tables$posthoc$contrast <<- vapply(pair_names, paste, character(1), collapse = " minus ")
+        }
+        pairs <- combn(levels(d$group), 2, simplify = FALSE)
+        if (!isTRUE(cfg$reverse_comparisons)) pairs <- lapply(pairs, rev)
+        g1 <- vapply(pairs, `[`, character(1), 1); g2 <- vapply(pairs, `[`, character(1), 2)
+        means <- tapply(d$y, d$group, mean); counts <- table(d$group)
+        tables$posthoc$group_1 <<- g1; tables$posthoc$group_2 <<- g2
+        tables$posthoc$mean_1 <<- unname(means[g1]); tables$posthoc$mean_2 <<- unname(means[g2]); tables$posthoc$mean_type <<- "Observed"
+        tables$posthoc$n1 <<- as.numeric(counts[g1]); tables$posthoc$n2 <<- as.numeric(counts[g2])
+        tables$posthoc$se <<- sqrt(sigma(fit)^2*(1/as.numeric(counts[g1]) + 1/as.numeric(counts[g2])))
+        tables$posthoc$df <<- df.residual(fit); tables$posthoc$statistic <<- tables$posthoc$diff/tables$posthoc$se
       } else tables$posthoc <<- mean_comparisons(d, cfg, kind = "ordinary", fit = fit)
     }
     if (method == "welch_anova") {
@@ -491,11 +550,12 @@ run_analysis <- function(data, config) {
     }
     if (method == "kruskal") {
       tables$test <<- htest_table(kruskal.test(y ~ group, data = d))
-      p <- pairwise_table(pairwise.wilcox.test(d$y, d$group, exact = FALSE, correct = TRUE, p.adjust.method = "none"))
-      if (cfg$comparisons == "control") { assert(cfg$control %in% levels(d$group), "Select a valid control group."); p <- p[p$group_1 == cfg$control | p$group_2 == cfg$control, , drop = FALSE] }
-      p$adjusted_p_value <- adjust_p(p$adjusted_p_value, cfg$adjustment); tables$posthoc <<- p
+      tables$posthoc <<- rank_comparisons(d, cfg)
     }
-    if (method == "friedman") tables$test <<- htest_table(friedman.test(y ~ group | id, data = d))
+    if (method == "friedman") {
+      tables$test <<- htest_table(friedman.test(y ~ group | id, data = d))
+      tables$posthoc <<- rank_comparisons(d, cfg, matched = TRUE)
+    }
     if (method == "rm_anova") {
       model <- repeated_anova(d, cfg$sphericity); fit <<- model$fit
       tables$test <<- model$tests
@@ -507,10 +567,10 @@ run_analysis <- function(data, config) {
     if (method == "mixed") {
       assert(requireNamespace("nlme", quietly = TRUE), "Install the nlme package using setup.R.")
       assert(nrow(d) > nlevels(d$id) + nlevels(d$group) - 1, "Not enough observations to estimate subject and residual variation.")
-      fit <<- nlme::lme(y ~ group, random = ~1 | id, data = d, method = "REML", na.action = na.fail)
-      a <- as.data.frame(anova(fit, type = "marginal"))
-      tables$test <<- data.frame(method = "REML random-intercept model: condition effect", statistic = a["group", "F-value"],
-        numerator_df = a["group", "numDF"], denominator_df = a["group", "denDF"], p_value = a["group", "p-value"])
+      fit <<- fit_mixed_options(d, cfg)
+      a <- mixed_omnibus(fit); info <- attr(fit, "labstats")
+      tables$test <<- data.frame(method = if (info$removed) "REML independent model after removing subject effect" else "REML compound-symmetry model: condition effect", statistic = unname(a["statistic"]),
+        numerator_df = unname(a["df1"]), denominator_df = unname(a["df2"]), p_value = pf(a["statistic"], a["df1"], a["df2"], lower.tail = FALSE))
       uncorrected <- tables$test
       gg <- if (cfg$sphericity == "gg") mixed_epsilon(d) else list(epsilon = 1, source = "Sphericity assumed", iterations = 0)
       tables$sphericity <<- data.frame(epsilon = gg$epsilon, estimator = gg$source, iterations = gg$iterations)
@@ -524,19 +584,27 @@ run_analysis <- function(data, config) {
       independent <- nlme::gls(y ~ group, data = d, method = "REML", na.action = na.fail)
       likelihood_ratio <- max(0, 2 * (as.numeric(logLik(fit)) - as.numeric(logLik(independent))))
       tables$matching <<- data.frame(method = "REML likelihood ratio: subject intercept vs independent residuals", statistic = likelihood_ratio,
-        df = 1, p_value = pchisq(likelihood_ratio, 1, lower.tail = FALSE), boundary_mixture_p_value = if (likelihood_ratio == 0) 1 else .5 * pchisq(likelihood_ratio, 1, lower.tail = FALSE))
-      # Random-intercept variance lies on the boundary; disclose both conventions.
-      notes <<- c(notes, "Matching diagnostic reports the conventional chi-square(1) likelihood-ratio p-value and the boundary-adjusted 50:50 chi-square(0)/chi-square(1) p-value. Fixed effects and input observations are identical in both REML fits.",
+        df = 1, p_value = pchisq(likelihood_ratio, 1, lower.tail = FALSE), boundary_mixture_p_value = if (cfg$random_effect == "full") NA_real_ else if (likelihood_ratio == 0) 1 else .5 * pchisq(likelihood_ratio, 1, lower.tail = FALSE))
+      notes <<- c(notes, if (cfg$random_effect == "full") "Matching diagnostic uses a conventional chi-square(1) likelihood-ratio test for signed within-subject covariance. A boundary-mixture p-value does not apply to the signed model." else "Matching diagnostic reports the conventional chi-square(1) likelihood-ratio p-value and the boundary-adjusted 50:50 chi-square(0)/chi-square(1) p-value for a nonnegative subject component. Fixed effects and input observations are identical in both REML fits.",
         paste("GG epsilon estimator:", gg$source, ". Missing-data covariance estimation does not fill or change the input table. Exact Prism equivalence has not been validated."))
-      coefficients <- summary(fit)$tTable; critical <- qt((1 + cfg$confidence)/2, coefficients[, "DF"])
+      coefficients <- mixed_coefficients(fit); critical <- qt((1 + cfg$confidence)/2, coefficients[, "DF"])
       tables$coefficients <<- data.frame(term = rownames(coefficients), estimate = coefficients[, "Value"], se = coefficients[, "Std.Error"],
         df = coefficients[, "DF"], p_value = coefficients[, "p-value"], ci_low = coefficients[, "Value"] - critical * coefficients[, "Std.Error"],
         ci_high = coefficients[, "Value"] + critical * coefficients[, "Std.Error"], row.names = NULL)
-      v <- nlme::VarCorr(fit)
-      tables$variance_components <<- data.frame(component = c("Subject intercept", "Residual"), variance = as.numeric(v[, "Variance"]), sd = as.numeric(v[, "StdDev"]))
-      tables$model <<- data.frame(observations = nrow(d), subjects = nlevels(d$id), estimation = "REML", covariance = "Random intercept + common residual variance", AIC = AIC(fit))
-      if (as.numeric(v[1, "Variance"]) < 1e-6 * as.numeric(v[2, "Variance"])) warnings <<- c(warnings, "Subject variance is near zero; the random effect is at the model boundary.")
+      design <- model.matrix(~group, data.frame(group = factor(levels(d$group), levels = levels(d$group))))
+      tables$predicted_means <<- data.frame(group = levels(d$group), n = as.numeric(table(d$group)),
+        mean = as.numeric(design %*% mixed_beta(fit)), se = sqrt(diag(design %*% vcov(fit) %*% t(design))))
+      v <- c(info$subject_variance, info$residual_variance)
+      tables$variance_components <<- data.frame(component = c("Subject covariance component", "Residual"), variance = v, sd = sqrt(pmax(v, 0)),
+        note = c(if (v[1] < 0) "Signed covariance component, not a negative physical variance; SD not defined" else if (info$removed) "Removed and model refitted" else "Subject random intercept", "Common residual variance"))
+      if (v[1] < 0) tables$variance_components$sd[1] <<- NA_real_
+      tables$model <<- data.frame(observations = nrow(d), subjects = nlevels(d$id), estimation = "REML", covariance = if (info$removed) "Independent residuals" else "Compound symmetry", AIC = AIC(fit),
+        random_effect_policy = cfg$random_effect, GLM_initial_values = cfg$glm_initial, starts_tried = info$starts_tried, selected_start = info$selected_start)
+      if (v[1] < 1e-6*v[2]) warnings <<- c(warnings, if (info$removed) "Subject component was nonpositive; removed and the simpler model refitted." else "The subject covariance component is near zero or negative; review the model summary.")
+      if (cfg$random_effect == "full") notes <<- c(notes, "Full model uses REML compound symmetry, allowing a signed subject covariance component while keeping the observation covariance positive definite. Denominator df use the repeated-measures containment convention, not Satterthwaite. Negative components are not physical variances.")
     }
+    if (cfg$comparisons == "trend") tables$trend <<- trend_table(d, cfg, fit, method)
+    if (method %in% c("anova", "rm_anova", "mixed")) tables <<- c(tables, extra_model_tables(d, fit, cfg, method))
     if (method == "two_way") {
       cells <- table(d$group, d$factor2)
       assert(nlevels(d$factor2) >= 2 && all(cells >= 2) && length(unique(as.vector(cells))) == 1, "Two-way ANOVA requires at least two replicates per cell and equal cell sizes in a complete factorial design.")
@@ -608,7 +676,23 @@ run_analysis <- function(data, config) {
     }
     if (method %in% c("anova", "welch_anova", "kruskal", "rm_anova", "mixed") && cfg$adjustment != "tukey") notes <<- c(notes, paste("Pairwise p-value adjustment:", cfg$adjustment, "; comparison family:", cfg$comparisons, ".", if (method == "kruskal") "Rank comparisons supply adjusted p-values without confidence intervals." else "Intervals use Sidak or Bonferroni simultaneous limits; Holm/BH corrections retain clearly labelled unadjusted intervals."))
     if (method %in% c("anova", "welch_anova", "kruskal", "rm_anova", "mixed") && cfg$adjustment == "sidak") notes <<- c(notes, "Sidak familywise interpretation assumes independent comparisons. Shared-control and paired contrasts are correlated, so familywise coverage is approximate; Bonferroni does not require comparison independence.")
+    residuals_for_tests <- residual_frame(list(method = method, data = d, fit = fit))
+    if (isTRUE(cfg$residual_normality)) {
+      assert(!is.null(residuals_for_tests), "Residual normality is unavailable for this analysis.")
+      tables$residual_normality <<- residual_normality_tests(residuals_for_tests$residual)
+    }
+    if (isTRUE(cfg$residual_variance)) {
+      assert(!method %in% c("rm_anova", "mixed", "friedman", "paired_t", "paired_wilcox"), "Independent-group variance tests are unavailable for matched data.")
+      assert(!is.null(residuals_for_tests), "Residual variance diagnostics are unavailable for this analysis.")
+      tables$residual_variance <<- residual_variance_tests(residuals_for_tests)
+    }
     tables <- lapply(tables, annotate_table, alpha = cfg$alpha)
+    if (!is.null(tables$posthoc) && cfg$adjustment %in% c("BH", "BY", "BKY")) {
+      tables$posthoc$discovery <- if (cfg$adjustment == "BKY") bky_rejections(tables$posthoc$p_value, cfg$fdr_q) else tables$posthoc$adjusted_p_value <= cfg$fdr_q
+      tables$posthoc$target_FDR <- cfg$fdr_q
+      tables$posthoc$significant <- NULL; tables$posthoc$p_summary <- NULL
+      notes <- c(notes, "FDR comparisons report discoveries at the selected Q. Any comparison intervals are unadjusted, not simultaneous FDR confidence intervals.")
+    }
     list(method = method, config = cfg, tables = tables, fit = fit, data = d, raw_data = raw_d, column_data = column_values, notes = notes)
   }
   result <- withCallingHandlers(calc(), warning = function(w) {
@@ -618,9 +702,15 @@ run_analysis <- function(data, config) {
   result
 }
 
-analysis_report <- function(result) {
+analysis_report <- function(result, options = list(), worksheet = NULL) {
+  settings <- modifyList(list(output_digits = 4L, p_style = "prism", p_digits = 6L), modifyList(result$config, options))
+  sheets <- result_sheets(result, worksheet = worksheet)
   c("LabStats analysis report", format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z"),
     names(analysis_methods)[match(result$method, analysis_methods)], "", result$notes,
     if (length(result$warnings)) c("", "WARNINGS", result$warnings),
-    unlist(lapply(names(result$tables), function(name) c("", toupper(name), capture.output(print(result$tables[[name]], row.names = FALSE, digits = 7))))))
+    unlist(lapply(sheets, function(sheet) c("", toupper(sheet$title), capture.output(print(sheet_frame(sheet, settings), row.names = FALSE)), sheet$note))),
+    unlist(lapply(names(attr(sheets, "additional")), function(name) {
+      table <- attr(sheets, "additional")[[name]]
+      c("", toupper(name), capture.output(print(format_result_table(table, settings$output_digits, settings$p_style, settings$p_digits), row.names = FALSE)))
+    })))
 }

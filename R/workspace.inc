@@ -2,6 +2,10 @@
 project <- reactiveVal(new_project())
 opened_table <- reactiveVal(NULL)
 active_table_id <- reactiveVal(NULL)
+selected_sheet <- reactiveVal(NULL)
+select_sheet <- function(kind, id) {
+  selected_sheet(if (is.null(id)) NULL else list(kind = kind, id = id))
+}
 working_table_id <- reactiveVal(NULL)
 archive_view <- reactiveVal(FALSE)
 
@@ -11,6 +15,7 @@ guard <- function(code) tryCatch(force(code), error = notify_error)
 load_table <- function(id) {
   t <- project()$tables[[id]]; req(t)
   active_table_id(id); working_table_id(id); opened_table(t); edited(NULL); saved(NULL); archive_view(FALSE)
+  select_sheet("tables", id)
   updateRadioButtons(session, "table_type", selected = t$type)
   updateSelectInput(session, "source", selected = "workspace")
   updateSelectInput(session, "layout", selected = t$layout)
@@ -27,26 +32,35 @@ save_current_table <- function(copy = FALSE, name = input$table_name, d = raw_da
   p <- isolate(project()); id <- isolate(working_table_id())
   record <- list(name = if (is.null(name) || !nzchar(trimws(name))) "Untitled table" else trimws(name),
     type = input$table_type, layout = if (input$table_type == "xy") "long" else input$layout,
-    columns = input$wide_columns, id_column = if (is.null(input$wide_id)) "" else input$wide_id,
+    columns = names(d)[names(d) %in% input$wide_columns], id_column = if (is.null(input$wide_id)) "" else input$wide_id,
     data = d, provenance = provenance)
   if (!copy && !is.null(id) && id %in% names(p$tables)) {
     record$id <- id; p$tables[[id]] <- record
   } else { added <- project_add(p, "tables", record); p <- added$project; id <- added$id }
   project(p); active_table_id(id); working_table_id(id)
+  select_sheet("tables", id)
+  if (!copy && identical(input$source, "upload")) {
+    states <- upload_states(); key <- upload_key(); state <- states[[key]]
+    state$data <- d; state$table_id <- id; states[[key]] <- state; upload_states(states)
+  }
   id
 }
 
 observeEvent(input$save_table, guard({ id <- save_current_table(); load_table(id); showNotification("Table saved in this project.") }))
 observeEvent(input$copy_table, guard({ id <- save_current_table(TRUE, paste(input$table_name, "copy")); load_table(id) }))
-observeEvent(input$source, { if (input$source != "workspace") { active_table_id(NULL); working_table_id(NULL) } }, ignoreInit = TRUE)
+observeEvent(input$source, { if (!input$source %in% c("workspace", "upload")) { active_table_id(NULL); working_table_id(NULL); selected_sheet(NULL) } }, ignoreInit = TRUE)
 observeEvent(input$save_info, {
   p <- project(); p$name <- input$project_name; p$info <- input$project_info; project(p)
   showNotification("Project information saved.")
 })
 
-project_button <- function(kind, id, name, active = FALSE) tags$button(type = "button",
+project_button <- function(kind, id, name) {
+  active <- identical(selected_sheet(), list(kind = kind, id = id))
+  tags$button(type = "button",
   class = paste("project-link", if (active) "selected" else ""), `data-kind` = kind, `data-key` = id,
+  `aria-pressed` = if (active) "true" else "false",
   title = name, span(class = "sheet-icon", switch(kind, tables = "\u25a6", analyses = "\u25a4", graphs = "\u2301", layouts = "\u25a3", "\u24d8")), name)
+}
 
 output$project_tree <- renderUI({
   p <- project(); search <- if (is.null(input$project_search)) "" else input$project_search
@@ -54,7 +68,7 @@ output$project_tree <- renderUI({
     entries <- p[[section]]
     if (nzchar(search)) entries <- Filter(function(e) grepl(tolower(search), tolower(e$name), fixed = TRUE), entries)
     tags$details(open = "open", class = "project-section", tags$summary(paste(switch(section, tables = "Data Tables", analyses = "Results", graphs = "Graphs", layouts = "Layouts"), length(entries))),
-      lapply(entries, function(e) project_button(section, e$id, e$name, identical(e$id, active_table_id()))),
+      lapply(entries, function(e) project_button(section, e$id, e$name)),
       if (!length(entries)) div(class = "hint", if (nzchar(search)) "No matches" else "No saved sheets yet"))
   }), project_button("info", "info", "Project information"))
 })
@@ -71,8 +85,8 @@ output$family_tree <- renderUI({
 open_analysis <- function(id) {
   a <- project()$analyses[[id]]; req(a)
   saved(a); archive_view(TRUE); active_table_id(a$table_id)
+  select_sheet("analyses", id)
   updateTextInput(session, "analysis_name", value = a$name)
-  updateSelectInput(session, "export_table", choices = names(a$result$tables), selected = names(a$result$tables)[1])
   updateTabsetPanel(session, "tabs", selected = "results")
 }
 observeEvent(input$project_open, guard({
@@ -94,6 +108,7 @@ observeEvent(input$project_open, guard({
         else updateSelectInput(session, id, selected = value)
       }
       updateTabsetPanel(session, "tabs", selected = "figure")
+      select_sheet("graphs", event$key)
     },
     layouts = {
       l <- p$layouts[[event$key]]; req(l)
@@ -102,7 +117,11 @@ observeEvent(input$project_open, guard({
       updateSelectInput(session, "layout_mode", selected = l$mode)
       updateNumericInput(session, "layout_columns", value = l$columns)
       updateTabsetPanel(session, "tabs", selected = "layouts")
-    }, info = updateTabsetPanel(session, "tabs", selected = "info"))
+      select_sheet("layouts", event$key)
+    }, info = {
+      updateTabsetPanel(session, "tabs", selected = "info")
+      select_sheet("info", "info")
+    })
 }))
 observeEvent(input$rename_analysis, guard({
   req(saved()); assert(nzchar(trimws(input$analysis_name)), "Enter an analysis name.")
@@ -139,7 +158,7 @@ observeEvent(input$save_graph, guard({
   figure(); p <- project(); req(saved()$id)
   name <- if (is.null(input$graph_name) || !nzchar(trimws(input$graph_name))) paste(names(graph_kinds)[match(input$graph_kind, graph_kinds)], saved()$name) else trimws(input$graph_name)
   added <- project_add(p, "graphs", list(name = name, analysis_id = saved()$id, kind = input$graph_kind, options = plot_options()))
-  project(added$project); showNotification("Graph saved.")
+  project(added$project); select_sheet("graphs", added$id); showNotification("Graph saved.")
 }))
 observeEvent(project(), {
   graphs <- project()$graphs
@@ -161,7 +180,7 @@ observeEvent(input$save_layout, guard({
   entries <- layout_entries()
   if (input$layout_mode == "overlay") overlay_graphs(entries)
   p <- project(); added <- project_add(p, "layouts", list(name = input$layout_name, graph_ids = input$layout_graphs, mode = input$layout_mode, columns = as.integer(input$layout_columns)))
-  project(added$project); showNotification("Layout saved.")
+  project(added$project); select_sheet("layouts", added$id); showNotification("Layout saved.")
 }))
 output$download_layout_png <- downloadHandler(filename = "layout.png", content = function(file) {
   grDevices::png(file, width = 10, height = 7, units = "in", res = 300); on.exit(grDevices::dev.off()); draw_layout()
@@ -172,7 +191,8 @@ output$download_layout_pdf <- downloadHandler(filename = "layout.pdf", content =
 output$download_project <- downloadHandler(filename = "labstats_project.json", content = function(file) writeLines(project_json(project()), file, useBytes = TRUE))
 observeEvent(input$project_file, guard({
   req(input$project_file); restored <- read_project(paste(readLines(input$project_file$datapath, warn = FALSE, encoding = "UTF-8"), collapse = "\n"))
-  project(restored); saved(NULL); edited(NULL); opened_table(NULL); active_table_id(NULL); working_table_id(NULL); archive_view(FALSE)
+  project(restored); saved(NULL); edited(NULL); upload_states(list()); opened_table(NULL); active_table_id(NULL); working_table_id(NULL); archive_view(FALSE)
+  selected_sheet(NULL)
   updateTextInput(session, "project_name", value = restored$name); updateTextAreaInput(session, "project_info", value = restored$info)
   if (length(restored$tables)) load_table(names(restored$tables)[1])
   else updateSelectInput(session, "source", selected = "demo")

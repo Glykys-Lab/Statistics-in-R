@@ -18,6 +18,20 @@ validate_import <- function(data) {
   as.data.frame(data, check.names = FALSE)
 }
 
+read_uploaded_table <- function(file, separator = ",", decimal = ".", sheet = NULL) {
+  assert(is.data.frame(file) && nrow(file) == 1, "Select one uploaded file to analyze.")
+  extension <- tolower(tools::file_ext(file$name))
+  if (extension %in% c("xlsx", "xls")) {
+    return(validate_import(readxl::read_excel(file$datapath,
+      sheet = if (is.null(sheet)) 1 else sheet, .name_repair = "minimal")))
+  }
+  assert(extension %in% c("csv", "tsv", "txt"), "Choose a CSV, TSV, or Excel file.")
+  separator <- if (extension %in% c("tsv", "txt")) "\t" else separator
+  validate_import(read.table(file$datapath, header = TRUE, sep = separator, dec = decimal,
+    check.names = FALSE, stringsAsFactors = FALSE, na.strings = c("", "NA", "NaN"),
+    comment.char = "", quote = "\""))
+}
+
 column_demo <- function(name = "groups") {
   d <- demo_data(if (name == "missing") "groups" else name)
   groups <- unique(d$group); subjects <- unique(d$subject)
@@ -49,24 +63,33 @@ edit_cell <- function(data, row, column, value, decimal = ".") {
 wide_to_long <- function(data, columns, id = "") {
   assert(length(columns) > 0 && all(columns %in% names(data)), "Select at least one measurement column.")
   assert(!id %in% columns, "The subject ID column cannot also be a measurement.")
+  # The worksheet, rather than the order of selector clicks, defines the sequence.
+  columns <- names(data)[names(data) %in% columns]
   for (name in columns) numeric_column(data, name)
   subject <- if (nzchar(id)) as.character(data[[id]]) else as.character(seq_len(nrow(data)))
-  do.call(rbind, lapply(columns, function(name) data.frame(subject = subject, group = name, response = data[[name]], stringsAsFactors = FALSE)))
+  long <- do.call(rbind, lapply(columns, function(name) data.frame(subject = subject, group = name, response = data[[name]], stringsAsFactors = FALSE)))
+  long$group <- factor(long$group, levels = columns)
+  long
 }
 
-reproduction_script <- function(data, config, plot_options = list(), graph_kind = "raw") {
+reproduction_script <- function(data, config, plot_options = list(), graph_kind = "raw", worksheet = NULL) {
+  if (!is.null(worksheet)) worksheet <- worksheet[intersect(c("name", "layout", "columns", "data"), names(worksheet))]
   c("# LabStats reproducible analysis: data and functions are embedded below.",
     "# This file contains your data. Share it only with intended recipients.",
-    "# Required packages: ggplot2; survival for survival analyses; nlme for mixed-effects analyses.",
-    "# install.packages(c('ggplot2', 'survival', 'nlme'))", "",
+    "# Required packages: ggplot2; survival for survival; nlme for mixed effects; nortest for residual normality.",
+    "# install.packages(c('ggplot2', 'survival', 'nlme', 'nortest'))", "",
+    readLines(file.path("R", "options.R"), warn = FALSE), "",
+    readLines(file.path("R", "results.R"), warn = FALSE), "",
     readLines(file.path("R", "analysis.R"), warn = FALSE), "",
     readLines(file.path("R", "plots.R"), warn = FALSE), "",
     "input_data <-", capture.output(dput(data)), "config <-", capture.output(dput(config)),
     "plot_options <-", capture.output(dput(plot_options)),
     "graph_kind <-", capture.output(dput(graph_kind)),
+    "worksheet <-", capture.output(dput(worksheet)),
     "result <- run_analysis(input_data, config)",
-    "writeLines(analysis_report(result), 'analysis_report.txt')",
-    "for (name in names(result$tables)) write.csv(result$tables[[name]], paste0(name, '.csv'), row.names = FALSE)",
+    "writeLines(analysis_report(result, worksheet = worksheet), 'analysis_report.txt')",
+    "tables <- result_export_tables(result, worksheet = worksheet, options = config)",
+    "for (name in names(tables)) write.csv(tables[[name]], paste0(name, '.csv'), row.names = FALSE)",
     "figure <- make_graph(result, graph_kind, plot_options)",
     "ggplot2::ggsave('figure.pdf', figure, width = 7, height = 5)",
     "ggplot2::ggsave('figure.png', figure, width = 7, height = 5, dpi = 300)",

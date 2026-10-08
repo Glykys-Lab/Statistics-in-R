@@ -27,7 +27,7 @@ for (method in c("welch", "student", "mann_whitney")) {
 set.seed(912)
 shuffled <- pair[sample(nrow(pair)), ]
 r <- run_analysis(shuffled, c(cfg, method = "paired_t", id = "subject"))
-vp <- split(pair$response, pair$group)
+vp <- split(pair$response, factor(pair$group, levels = levels(r$data$group)))
 check(near(r$tables$test$p_value, t.test(vp[[1]], vp[[2]], paired = TRUE)$p.value), "Paired test matches by ID after row shuffling")
 check(near(r$tables$test$estimate, mean(vp[[1]] - vp[[2]])), "Paired difference sign follows named contrast")
 partial <- pair; partial$response[1] <- NA
@@ -83,6 +83,7 @@ check(fails(run_analysis(s, list(method = "survival", y = "time", event = "event
 wide <- data.frame(id = c("a", "b"), Control = c(1, 2), Treatment = c(3, 4))
 long <- wide_to_long(wide, c("Control", "Treatment"), "id")
 check(identical(long$subject, c("a", "b", "a", "b")) && identical(long$response, c(1, 2, 3, 4)), "Wide data preserves subject alignment")
+source("tests/order_tests.R")
 
 # Design routing must cover every requested independent/matched variant.
 check(unname(design_methods(family = "two")) == "welch", "Independent Gaussian two-group design selects Welch")
@@ -176,5 +177,7 @@ for (config in list(rm_cfg, mixed_cfg)) {
   check(near(env$result$tables$test$p_value, run_analysis(rm_missing, config)$tables$test$p_value), paste("Standalone export reproduces", config$method))
 }
 source("tests/project_tests.R", encoding = "UTF-8")
+source("tests/options_tests.R", encoding = "UTF-8")
+source("tests/results_tests.R", encoding = "UTF-8")
 cat("\n", checks, "checks passed.\n")
 source("tests/server_tests.R")

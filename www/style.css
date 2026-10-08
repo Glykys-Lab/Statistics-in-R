@@ -76,8 +76,22 @@ h4 { font-size: 15px; font-weight: 650; margin: 19px 0 12px; }
 .controls h3 { margin-bottom: 14px; font-size: 15px; }
 .controls hr { margin: 17px 0; }
 .navigator { display: grid; gap: 3px; margin-bottom: 4px; }
-.nav-sheet { text-align: left; background: #f2f5f9; border: 1px solid transparent; padding: 9px 12px; border-radius: 3px; color: #405873; font-size: 12px; }
-.nav-sheet:hover, .nav-sheet:focus { background: #e5effb; border-color: #b3cbe7; }
+.navigator .nav-sheet {
+  --bs-btn-color: #405873;
+  --bs-btn-bg: #f2f5f9;
+  --bs-btn-hover-color: #25364a;
+  --bs-btn-hover-bg: #e5effb;
+  --bs-btn-hover-border-color: #b3cbe7;
+  --bs-btn-active-color: #25364a;
+  --bs-btn-active-bg: #e5effb;
+  --bs-btn-active-border-color: #b3cbe7;
+  text-align: left; background: #f2f5f9; border: 1px solid transparent; padding: 9px 12px; border-radius: 3px; color: #405873; font-size: 12px;
+}
+.navigator .nav-sheet:hover, .navigator .nav-sheet:focus, .navigator .nav-sheet:focus-visible, .navigator .nav-sheet:active {
+  background: #e5effb; border-color: #b3cbe7;
+  /* Keep the label readable even when the theme supplies a white state color. */
+  color: #25364a !important;
+}
 .analysis-choice { font-size: 11px; line-height: 1.6; border-left: 3px solid #a9c7e9; padding: 9px 11px; margin-bottom: 16px; background: #f3f7fc; color: #52677f; }
 .form-control, .form-select, .selectize-input { border-radius: 3px; border-color: #ccd6e2; }
 .run-button { border-radius: 4px; padding: 10px 18px; }
@@ -117,9 +131,29 @@ h4 { font-size: 15px; font-weight: 650; margin: 19px 0 12px; }
 .project-browser { max-height: 230px; overflow-y: auto; }
 .family-children { padding-left: 14px; max-height: 150px; overflow-y: auto; }
 .result-sheet { min-height: 350px; padding-top: 14px; }
+.options-tab-body { padding: 20px 0 12px; }
+.options-tab-body .shiny-input-container { max-width: 780px; }
 .result-sheet table { border-collapse: collapse; }
 .result-sheet td { border: 1px solid #ead8d4; }
 .result-sheet th { background: #edf1f5; border: 1px solid #c8d2dc; white-space: nowrap; }
+.result-management { margin: 0 0 16px; }
+.result-management > summary { cursor: pointer; font-size: 13px; font-weight: 600; }
+.prism-sheet-wrap { max-width: 100%; overflow-x: auto; padding-top: 10px; }
+.prism-result-sheet { border-collapse: collapse; min-width: 100%; font-size: 13px; color: #1d2b3a; background: white; }
+.prism-result-sheet th, .prism-result-sheet td { border: 1px solid #f1cbc5; padding: 4px 8px; height: 25px; text-align: left; white-space: nowrap; font-weight: 400; }
+.prism-result-sheet thead th { border-color: #bfc8d2; background: #f0f2f5; text-align: center; }
+.prism-result-sheet .sheet-corner { min-width: 250px; white-space: normal; }
+.sheet-analysis-title { color: #2467ae; font-weight: 650; }
+.prism-result-sheet .sheet-letter { color: #7c8da2; padding: 2px 8px; height: 20px; }
+.prism-result-sheet .sheet-dataset { font-weight: 600; min-width: 100px; }
+.prism-result-sheet .sheet-dataset:empty { min-width: 65px; }
+.prism-result-sheet .sheet-row-number { background: #f0f2f5; color: #8a94a2; text-align: right; min-width: 32px; width: 32px; border-color: #c8d2dc; }
+.prism-result-sheet .sheet-statistic { min-width: 250px; }
+.prism-result-sheet .sheet-row-section .sheet-statistic, .prism-result-sheet .sheet-row-header th, .prism-result-sheet .sheet-row-header td { font-weight: 650; }
+.prism-result-sheet .sheet-row-header td { white-space: normal; min-width: 65px; max-width: 150px; }
+.prism-result-sheet .sheet-highlight { background: #fffed4; }
+.prism-result-sheet .sheet-row-blank th, .prism-result-sheet .sheet-row-blank td { height: 18px; }
+.sheet-note { white-space: normal; max-width: 1100px; margin: 12px 0; }
 .controls > .shiny-input-container { width: 100%; }
 @media (min-width: 768px) {
   .workspace-row > .col-sm-3 { display: flex; flex-direction: column; }

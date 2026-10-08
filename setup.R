@@ -1,7 +1,7 @@
 # Run once from the project directory. Packages stay inside this project.
 dir.create(".R-library", showWarnings = FALSE)
 .libPaths(c(normalizePath(".R-library"), .Library), include.site = FALSE)
-packages <- c("shiny", "ggplot2", "readxl", "survival", "nlme", "jsonlite")
+packages <- c("shiny", "ggplot2", "readxl", "survival", "nlme", "jsonlite", "nortest")
 missing <- packages[!vapply(packages, requireNamespace, logical(1), quietly = TRUE)]
 if (length(missing)) {
   # Repair incomplete transitive dependencies as well as top-level packages.

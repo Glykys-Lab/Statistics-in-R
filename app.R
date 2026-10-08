@@ -1,5 +1,5 @@
 if (dir.exists(".R-library")) .libPaths(c(normalizePath(".R-library"), .libPaths()))
-required <- c("shiny", "ggplot2", "readxl", "survival", "nlme", "jsonlite")
+required <- c("shiny", "ggplot2", "readxl", "survival", "nlme", "jsonlite", "nortest")
 missing <- required[!vapply(required, requireNamespace, logical(1), quietly = TRUE)]
 if (length(missing)) stop("Run source('setup.R') first. Missing packages: ", paste(missing, collapse = ", "))
 library(shiny)
@@ -19,7 +19,9 @@ server <- function(input, output, session) {
   edited <- reactiveVal(NULL)
   pasted <- reactiveVal(NULL)
   sheet_revision <- reactiveVal(0L)
+  upload_states <- reactiveVal(list())
   source("R/workspace.inc", local = TRUE)
+  source("R/options_server.inc", local = TRUE)
   observeEvent(input$import_data, {
     updateSelectInput(session, "source", selected = "upload")
     updateTabsetPanel(session, "tabs", selected = "data")
@@ -27,14 +29,24 @@ server <- function(input, output, session) {
   output$distribution_ui <- renderUI({
     choices <- c("Approximately Gaussian (parametric)" = "normal", "Rank-based (nonparametric)" = "rank")
     if (identical(input$matching, "matched") && identical(input$family, "many")) choices <- c(choices, "Lognormal (analyze log responses)" = "lognormal")
-    selected <- isolate(input$distribution); if (is.null(selected) || !selected %in% choices) selected <- "normal"
+    selected <- pending_preferences()$distribution
+    if (is.null(selected)) selected <- isolate(input$distribution)
+    if (is.null(selected) || !selected %in% choices) selected <- "normal"
     radioButtons("distribution", "Distribution assumption", choices, selected = selected)
   })
-  output$adjustment_ui <- renderUI({
-    choices <- c("Sidak (adjusted p-values and intervals)" = "sidak", "Holm (p-values; unadjusted intervals)" = "holm", "Bonferroni (p-values and intervals)" = "bonferroni", "Benjamini-Hochberg (p-values only)" = "BH", "None" = "none")
-    if (identical(input$method, "anova")) choices <- c(choices, "Tukey (all pairs only)" = "tukey")
-    selected <- isolate(input$adjustment); if (is.null(selected) || !selected %in% choices) selected <- "sidak"
-    selectInput("adjustment", "Multiple-comparison correction", choices, selected = selected)
+  # Keep this input mounted even when its tab is hidden. Rebuilding it as an
+  # output leaves a faded, stale control while hidden outputs are suspended.
+  correction_update <- reactiveVal(NULL)
+  observe({
+    choices <- comparison_correction_choices(input$method, input_or("comparisons", "all"), input_or("error_control", "fwer"))
+    selected <- pending_preferences()$adjustment
+    if (is.null(selected)) selected <- isolate(input$adjustment)
+    if (is.null(selected) || !selected %in% choices) selected <- unname(choices[1])
+    update <- list(choices = choices, selected = selected)
+    if (!identical(update, isolate(correction_update())) || !identical(selected, isolate(input$adjustment))) {
+      updateSelectInput(session, "adjustment", choices = choices, selected = selected)
+      correction_update(update)
+    }
   })
   output$control_ui <- renderUI({
     d <- data(); req(input$group %in% names(d)); selectInput("control", "Control group", levels(group_column(d, input$group)))
@@ -62,10 +74,36 @@ server <- function(input, output, session) {
     tryCatch({ pasted(paste_table(input$paste_text, input$decimal)); showNotification("Pasted table loaded.", type = "message") },
       error = function(e) showNotification(conditionMessage(e), type = "error"))
   })
-  file_is_excel <- reactive({ req(input$file); tolower(tools::file_ext(input$file$name)) %in% c("xlsx", "xls") })
+  observeEvent(input$file, {
+    upload_states(list())
+    updateSelectInput(session, "upload_index", selected = "1")
+  }, priority = 200)
+  uploaded_file <- reactive({
+    req(input$file, nrow(input$file) > 0)
+    index <- suppressWarnings(as.integer(input$upload_index))
+    if (length(index) != 1 || is.na(index) || !index %in% seq_len(nrow(input$file))) index <- 1L
+    input$file[index, , drop = FALSE]
+  })
+  output$uploaded_file_ui <- renderUI({
+    req(input$source == "upload", input$file, nrow(input$file) > 1)
+    labels <- make.unique(input$file$name, sep = " #")
+    selected <- isolate(input$upload_index)
+    if (is.null(selected) || !selected %in% as.character(seq_len(nrow(input$file)))) selected <- "1"
+    selectInput("upload_index", "File to analyze", setNames(as.character(seq_len(nrow(input$file))), labels), selected = selected)
+  })
+  file_is_excel <- reactive({ tolower(tools::file_ext(uploaded_file()$name)) %in% c("xlsx", "xls") })
+  upload_key <- reactive({
+    file <- uploaded_file()
+    if (file_is_excel()) return(paste(file$datapath, "excel", if (is.null(input$sheet)) "" else input$sheet, sep = "\r"))
+    extension <- tolower(tools::file_ext(file$name))
+    separator <- if (extension %in% c("tsv", "txt")) "\t" else if (is.null(input$separator)) "," else input$separator
+    paste(file$datapath, separator,
+      if (is.null(input$decimal)) "." else input$decimal,
+      sep = "\r")
+  })
   output$sheet_ui <- renderUI({
-    req(input$source == "upload", input$file, file_is_excel())
-    sheets <- tryCatch(readxl::excel_sheets(input$file$datapath), error = function(e) character())
+    req(input$source == "upload", file_is_excel())
+    sheets <- tryCatch(readxl::excel_sheets(uploaded_file()$datapath), error = function(e) character())
     selectInput("sheet", "Excel worksheet", sheets)
   })
   base_data <- reactive({
@@ -84,20 +122,33 @@ server <- function(input, output, session) {
       return(as.data.frame(setNames(rep(list(rep(NA_real_, rows)), groups), paste("Group", LETTERS[seq_len(groups)])), check.names = FALSE))
     }
     if (input$source == "paste") { req(pasted()); return(pasted()) }
-    req(input$file)
+    file <- uploaded_file()
     tryCatch({
-      if (file_is_excel()) {
-        req(input$sheet)
-        validate_import(readxl::read_excel(input$file$datapath, sheet = input$sheet, .name_repair = "minimal"))
-      } else {
-        sep <- if (tolower(tools::file_ext(input$file$name)) %in% c("tsv", "txt")) "\t" else input$separator
-        validate_import(read.table(input$file$datapath, header = TRUE, sep = sep, dec = input$decimal, check.names = FALSE, stringsAsFactors = FALSE, na.strings = c("", "NA", "NaN"), comment.char = "", quote = "\""))
-      }
+      if (file_is_excel()) req(input$sheet)
+      read_uploaded_table(file, if (is.null(input$separator)) "," else input$separator,
+        if (is.null(input$decimal)) "." else input$decimal, input$sheet)
     }, error = function(e) validate(need(FALSE, conditionMessage(e))))
   })
   observeEvent(base_data(), {
-    edited(NULL); sheet_revision(isolate(sheet_revision()) + 1L)
-    if (input$source != "workspace") { active_table_id(NULL); working_table_id(NULL) }
+    sheet_revision(isolate(sheet_revision()) + 1L)
+    if (identical(input$source, "upload")) {
+      state <- upload_states()[[upload_key()]]
+      table <- if (is.null(state$table_id)) NULL else project()$tables[[state$table_id]]
+      edited(if (is.null(table)) state$data else table$data)
+      active_table_id(state$table_id); working_table_id(state$table_id)
+      select_sheet("tables", state$table_id)
+      restored <- if (is.null(state$analysis_id)) NULL else project()$analyses[[state$analysis_id]]
+      saved(restored)
+      archive_view(FALSE)
+      updateTextInput(session, "table_name", value = if (is.null(state$table_id)) tools::file_path_sans_ext(uploaded_file()$name) else project()$tables[[state$table_id]]$name)
+      if (!is.null(restored)) {
+        updateTextInput(session, "analysis_name", value = restored$name)
+        updateSelectInput(session, "graph_kind", selected = "raw")
+      }
+    } else {
+      edited(NULL)
+      if (input$source != "workspace") { active_table_id(NULL); working_table_id(NULL); selected_sheet(NULL) }
+    }
   }, priority = 100)
   raw_data <- reactive({ d <- base_data(); if (is.null(edited())) d else edited() })
   observeEvent(input$cell_edit, {
@@ -107,6 +158,11 @@ server <- function(input, output, session) {
       edited(edit_cell(raw_data(), as.integer(cell$row), as.integer(cell$column), cell$value, input$decimal)); archive_view(FALSE)
       id <- working_table_id()
       if (identical(input$source, "workspace") && !is.null(id)) { p <- project(); p$tables[[id]]$data <- edited(); project(p) }
+      if (identical(input$source, "upload")) {
+        states <- upload_states(); key <- upload_key(); state <- states[[key]]
+        state$data <- edited(); state$table_id <- id; states[[key]] <- state; upload_states(states)
+        if (!is.null(id)) { p <- project(); p$tables[[id]]$data <- edited(); project(p) }
+      }
     },
       error = function(e) { showNotification(conditionMessage(e), type = "error"); sheet_revision(sheet_revision() + 1L) })
   })
@@ -131,8 +187,9 @@ server <- function(input, output, session) {
     if (input$table_type == "column") {
       updateSelectInput(session, "layout", selected = "wide")
       updateSelectInput(session, "family", selected = if (input$demo == "paired") "two" else "many")
-      updateRadioButtons(session, "matching", selected = if (input$demo %in% c("paired", "missing")) "matched" else "independent")
-      updateSelectInput(session, "repeated", selected = if (input$demo == "missing") "mixed" else "complete")
+      preferred <- preferences()
+      updateRadioButtons(session, "matching", selected = if (!is.null(preferred$matching)) preferred$matching else if (input$demo %in% c("paired", "missing")) "matched" else "independent")
+      updateRadioButtons(session, "repeated", selected = if (!is.null(preferred$repeated)) preferred$repeated else if (input$demo == "missing") "mixed" else "auto")
       return()
     }
     updateSelectInput(session, "layout", selected = "long")
@@ -153,28 +210,31 @@ server <- function(input, output, session) {
     if (m %in% c("chisq", "fisher")) return(tagList(g, selectInput("factor2", "Column category", n, selected = pick(c("outcome", "category"), setdiff(n, pick("group", n)))), selectInput("count", "Cell count", nums, selected = pick("count", nums))))
     if (xy_method) return(tagList(selectInput("x", if (m == "dose") "Concentration (original scale)" else "X", nums, selected = x_selected), y))
     tagList(y, g,
-      if (m %in% c("paired_t", "paired_wilcox", "friedman", "rm_anova", "mixed", "log_rm_anova", "log_mixed")) selectInput("id", "Matched subject ID", n, selected = pick(c("subject", "Subject", "id", "sample"), n)),
+      if (m %in% c("paired_t", "paired_wilcox", "friedman", "rm_anova", "mixed", "log_rm_anova", "log_mixed", "rm_auto", "log_rm_auto")) selectInput("id", "Matched subject ID", n, selected = pick(c("subject", "Subject", "id", "sample"), n)),
       if (m == "two_way") selectInput("factor2", "Second factor", n, selected = pick(c("sex", "factor2"), setdiff(n, pick("group", n)))),
       if (m == "survival") selectInput("event", "Event indicator (0 / 1)", nums, selected = pick("event", nums)))
   })
-  config <- reactive(list(method = input$method, y = input$y, group = input$group, x = input$x, id = input$id, factor2 = input$factor2, event = input$event, count = input$count, confidence = as.numeric(input$confidence), adjustment = input$adjustment, direction = input$direction, sphericity = input$sphericity, alpha = if (is.null(input$alpha)) .05 else input$alpha, comparisons = if (is.null(input$comparisons)) "all" else input$comparisons, control = input$control, rout_q = if (is.null(input$rout_q)) .01 else as.numeric(input$rout_q)))
+  config <- reactive(list(method = input$method, y = input$y, group = input$group, x = input$x, id = input$id, factor2 = input$factor2, event = input$event, count = input$count, confidence = as.numeric(input_or("confidence", .95)), adjustment = input_or("adjustment", "sidak"), direction = input$direction, sphericity = input_or("sphericity", "gg"), alpha = input_or("alpha", .05), comparisons = input_or("comparisons", "all"), control = input$control, rout_q = as.numeric(input_or("rout_q", .01))))
   # Track only fields used by the selected method, so hidden controls cannot change results.
   current_config <- reactive({
-    z <- config(); m <- z$method
+    z <- config(); m <- z$method; req(length(m) == 1, nzchar(m))
     keys <- c("method", "confidence", "alpha")
     if (m %in% c("chisq", "fisher")) keys <- c(keys, "group", "factor2", "count")
     else if (m %in% c("pearson", "spearman", "linear", "dose")) keys <- c(keys, "x", "y", if (m == "dose") "direction")
-    else keys <- c(keys, "y", "group", if (m %in% c("paired_t", "paired_wilcox", "friedman", "rm_anova", "mixed", "log_rm_anova", "log_mixed")) "id", if (m == "two_way") "factor2", if (m == "survival") "event")
-    if (m %in% c("anova", "welch_anova", "kruskal", "rm_anova", "mixed", "log_rm_anova", "log_mixed")) keys <- c(keys, "adjustment", "comparisons", if (identical(z$comparisons, "control")) "control")
-    if (m %in% c("rm_anova", "mixed", "log_rm_anova", "log_mixed")) keys <- c(keys, "sphericity")
+    else keys <- c(keys, "y", "group", if (m %in% c("paired_t", "paired_wilcox", "friedman", repeated_methods)) "id", if (m == "two_way") "factor2", if (m == "survival") "event")
+    if (m %in% one_way_methods) keys <- c(keys, "adjustment", "comparisons", if (identical(z$comparisons, "control")) "control")
+    if (m %in% repeated_methods) keys <- c(keys, "sphericity")
     if (m == "outliers") keys <- c(keys, "rout_q")
-    z[keys]
+    z <- z[keys]
+    if (m %in% one_way_methods && identical(input$error_control, "none")) z$adjustment <- "none"
+    if (m %in% one_way_methods && identical(input$error_control, "fdr") && !z$adjustment %in% c("BKY", "BH", "BY")) z$adjustment <- "BKY"
+    modifyList(z, advanced_config())
   })
-  is_current <- reactive({ s <- saved(); !is.null(s) && (archive_view() || (identical(s$config, current_config()) && identical(s$input_data, data()))) })
+  is_current <- reactive({ s <- saved(); !is.null(s) && (archive_view() || (identical(s$table_id, working_table_id()) && identical(s$config, current_config()) && identical(s$input_data, data()))) })
   # Compare live inputs even while viewing an archived result.
   analysis_unchanged <- reactive({
     s <- saved()
-    !is.null(s) && identical(s$config, current_config()) && identical(s$input_data, data())
+    !is.null(s) && identical(s$table_id, working_table_id()) && identical(s$config, current_config()) && identical(s$input_data, data())
   })
   observe({
     unchanged <- tryCatch(analysis_unchanged(), error = function(e) FALSE)
@@ -186,6 +246,18 @@ server <- function(input, output, session) {
     if (isTRUE(tryCatch(analysis_unchanged(), error = function(e) FALSE))) return()
     saved(NULL); analysis_error(NULL)
     tryCatch({
+      # req() silently stops reactive outputs, but Analyze needs a visible error.
+      if (identical(input$source, "upload")) {
+        assert(!is.null(input$file) && nrow(input$file) > 0L,
+          "Choose a CSV, TSV or Excel file using Browse before clicking Analyze.")
+        if (file_is_excel()) assert(isTruthy(input$sheet), "Choose an Excel worksheet before clicking Analyze.")
+      }
+      if (identical(input$source, "paste")) assert(!is.null(pasted()),
+        "Paste a table and click Use pasted table before clicking Analyze.")
+      if (identical(input$source, "workspace")) assert(!is.null(opened_table()),
+        "Open a saved project table or choose another data source before clicking Analyze.")
+      if (!identical(input$table_type, "xy") && identical(input$layout, "wide")) assert(isTruthy(input$wide_columns),
+        "Select the measurement columns to analyze.")
       d <- data(); cfg <- current_config()
       if (input$table_type == "column" && input$family == "many") assert(nlevels(group_column(d, cfg$group)) >= 3, "Select at least three group columns, or choose the two-group comparison.")
       res <- run_analysis(d, cfg)
@@ -193,16 +265,27 @@ server <- function(input, output, session) {
       p <- project(); name <- paste(names(analysis_methods)[match(res$method, analysis_methods)], "of", p$tables[[table_id]]$name)
       added <- project_add(p, "analyses", list(name = name, table_id = table_id, worksheet = p$tables[[table_id]], result = res, input_data = d, config = cfg, time = as.character(Sys.time())))
       p <- added$project; analysis_id <- added$id
-      for (kind in c("raw", "normal_qq", "lognormal_qq", "comparison")) {
+      for (kind in unique(c("raw", "normal_qq", "lognormal_qq", if (is.null(cfg$diagnostic_graphs)) "comparison" else cfg$diagnostic_graphs))) {
         possible <- tryCatch({ make_graph(res, kind); TRUE }, error = function(e) FALSE)
         if (possible) p <- project_add(p, "graphs", list(name = paste(names(graph_kinds)[match(kind, graph_kinds)], "of", name), analysis_id = analysis_id, kind = kind, options = list()))$project
       }
       project(p); archive_view(FALSE); saved(p$analyses[[analysis_id]])
+      removeNotification("analysis-error")
+      select_sheet("analyses", analysis_id)
+      states <- upload_states()
+      for (key in names(states)) {
+        if (identical(states[[key]]$table_id, table_id)) states[[key]]$analysis_id <- analysis_id
+      }
+      upload_states(states)
       updateTextInput(session, "analysis_name", value = name)
       updateSelectInput(session, "graph_kind", selected = "raw")
-      updateSelectInput(session, "export_table", choices = names(res$tables), selected = if ("test" %in% names(res$tables)) "test" else names(res$tables)[1])
       updateTabsetPanel(session, "tabs", selected = "results")
-    }, error = function(e) { analysis_error(conditionMessage(e)); showNotification(conditionMessage(e), type = "error", duration = NULL) })
+    }, error = function(e) {
+      message <- trimws(conditionMessage(e))
+      if (!nzchar(message)) message <- "Select a data table and complete the analysis settings before clicking Analyze."
+      analysis_error(message)
+      showNotification(message, id = "analysis-error", type = "error", duration = NULL)
+    })
   })
   output$method_help <- renderText(method_note(input$method))
   output$sheet_title <- renderText(if (identical(input$source, "workspace")) opened_table()$name else switch(input$table_type, column = "Column data table", xy = "XY data table", "Data table"))
@@ -225,7 +308,7 @@ server <- function(input, output, session) {
   })
   output$preview <- renderTable(head(data(), 100), striped = TRUE, bordered = FALSE, spacing = "s")
   output$status <- renderUI({
-    if (is.null(saved()) && !is.null(analysis_error())) return(div(class = "status-bar stale", analysis_error()))
+    if (is.null(saved()) && !is.null(analysis_error())) return(div(class = "status-bar stale", role = "alert", analysis_error()))
     if (is.null(saved())) return(div(class = "status-bar", span(class = "status-dot"), "Data worksheet", span(class = "status-detail", "Enter data and click Analyze")))
     if (!is_current()) return(div(class = "status-bar stale", "Settings changed \u2014 run the analysis again."))
     a <- result()$tables$data_audit
@@ -234,21 +317,29 @@ server <- function(input, output, session) {
   output$results_header <- renderUI({ r <- result(); tagList(span(class = "eyebrow", "ANALYSIS RESULTS"), h3(names(analysis_methods)[match(r$method, analysis_methods)])) })
   output$notes <- renderUI({ r <- result(); tagList(div(class = "method-note", lapply(r$notes, tags$p)), if (length(r$warnings)) div(class = "warning-note", h4("Review before interpreting"), lapply(r$warnings, tags$p))) })
   output$cleaned_action <- renderUI({ if (result()$method == "outliers") actionButton("save_cleaned", "Create cleaned data table") })
+  display_sheets <- reactive(result_sheets(result(), worksheet = saved()$worksheet))
   output$results_tables <- renderUI({
-    r <- result()
-    do.call(tabsetPanel, c(list(id = "result_sheets", selected = if ("outlier_summary" %in% names(r$tables)) "outlier_summary" else if ("test" %in% names(r$tables)) "test" else if ("distribution_tests" %in% names(r$tables)) "distribution_tests" else names(r$tables)[1]),
-      lapply(names(r$tables), function(n) tabPanel(gsub("_", " ", tools::toTitleCase(n)), value = n, div(class = "table-scroll result-sheet", tableOutput(paste0("table_", n)))))))
+    sheets <- display_sheets(); additional <- attr(sheets, "additional")
+    panels <- lapply(names(sheets), function(n) tabPanel(sheets[[n]]$title, value = n, uiOutput(paste0("sheet_", n))))
+    if (length(additional)) panels <- c(panels, list(tabPanel("Additional results", value = "additional", do.call(tabsetPanel, c(list(id = "additional_result_sheets"),
+      lapply(names(additional), function(n) tabPanel(gsub("_", " ", tools::toTitleCase(n)), value = n, div(class = "table-scroll result-sheet", tableOutput(paste0("table_", n))))))))))
+    do.call(tabsetPanel, c(list(id = "result_sheets", selected = if (length(sheets)) names(sheets)[1] else "additional"), panels))
   })
   observeEvent(saved(), {
     req(saved())
+    sheets <- result_sheets(saved()$result, worksheet = saved()$worksheet)
+    choices <- result_export_choices(saved()$result, worksheet = saved()$worksheet)
+    updateSelectInput(session, "export_table", choices = choices, selected = unname(choices[1]))
+    for (name in names(sheets)) local({
+      n <- name
+      output[[paste0("sheet_", n)]] <- renderUI(result_sheet_ui(display_sheets()[[n]], display_options(), names(analysis_methods)[match(result()$method, analysis_methods)]))
+    })
     for (name in names(saved()$result$tables)) local({
       n <- name
       output[[paste0("table_", n)]] <- renderTable({
-        table <- result()$tables[[n]]
-        for (col in intersect(names(table), c("p_value", "adjusted_p_value", "p adj", "Pr(>F)", "Pr(>|t|)"))) {
-          table[[col]] <- ifelse(is.na(table[[col]]), NA_character_, format.pval(table[[col]], digits = 4, eps = 1e-15))
-        }
-        table
+        table <- display_tables()[[n]]; req(table)
+        opts <- display_options()
+        format_result_table(table, opts$output_digits, opts$p_style, opts$p_digits)
       }, digits = 6, striped = TRUE, spacing = "s", na = "\u2014")
     })
   })
@@ -265,9 +356,9 @@ server <- function(input, output, session) {
   output$normality_figure <- renderPlot({ p <- normality_plot(result()); if (!is.null(p)) print(p) }, res = 100)
   output$settings <- renderPrint({ result(); print(saved()$config) })
   output$download_data <- downloadHandler(filename = "input_data.csv", content = function(file) write.csv(data(), file, row.names = FALSE))
-  output$download_table <- downloadHandler(filename = function() paste0(input$export_table, ".csv"), content = function(file) { r <- result(); req(input$export_table %in% names(r$tables)); write.csv(r$tables[[input$export_table]], file, row.names = FALSE) })
-  output$download_report <- downloadHandler(filename = "analysis_report.txt", content = function(file) writeLines(c(analysis_report(result()), "", "SETTINGS", capture.output(dput(saved()$config))), file))
-  output$download_script <- downloadHandler(filename = "reproduce_analysis.R", content = function(file) { result(); writeLines(reproduction_script(saved()$input_data, saved()$config, plot_options(), if (is.null(input$graph_kind)) "raw" else input$graph_kind), file) })
+  output$download_table <- downloadHandler(filename = function() paste0(input$export_table, ".csv"), content = function(file) { tables <- result_export_tables(result(), worksheet = saved()$worksheet, options = display_options()); req(input$export_table %in% names(tables)); write.csv(tables[[input$export_table]], file, row.names = FALSE) })
+  output$download_report <- downloadHandler(filename = "analysis_report.txt", content = function(file) writeLines(c(analysis_report(result(), display_options(), saved()$worksheet), "", "SETTINGS", capture.output(dput(saved()$config))), file))
+  output$download_script <- downloadHandler(filename = "reproduce_analysis.R", content = function(file) { result(); writeLines(reproduction_script(saved()$input_data, modifyList(saved()$config, display_options()), plot_options(), if (is.null(input$graph_kind)) "raw" else input$graph_kind, saved()$worksheet), file) })
   output$download_session <- downloadHandler(filename = "session_info.txt", content = function(file) writeLines(capture.output(sessionInfo()), file))
   output$download_png <- downloadHandler(filename = "figure.png", content = function(file) ggplot2::ggsave(file, figure(), width = 7, height = 5, dpi = 300, bg = "white"))
   output$download_pdf <- downloadHandler(filename = "figure.pdf", content = function(file) ggplot2::ggsave(file, figure(), width = 7, height = 5, device = "pdf", bg = "white"))
