@@ -1,3 +1,7 @@
+# Simulate real uploaded files and Shiny events with independent per-file states.
+# Cover switching/editing files, isolated invalid uploads, CSV decimal conventions,
+# Excel import, project restoration and readable errors when required inputs are absent.
+# Temporary CSV fixtures are written under artifacts/ and removed after import checks.
 if (dir.exists(".R-library")) .libPaths(c(normalizePath(".R-library"), .libPaths()))
 upload_app <- new.env(parent = globalenv())
 sys.source("app.R", envir = upload_app)

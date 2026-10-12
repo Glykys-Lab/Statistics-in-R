@@ -1,8 +1,13 @@
 # Projects store data and settings as JSON, never serialized executable R objects.
+# Manage named tables, immutable analyses, saved graphs, layouts and project notes.
+# read_project() validates references and reruns saved analyses from their inputs;
+# pack_frame/unpack_frame preserve column types and missing cells across JSON.
 new_project <- function(name = "Untitled project") list(version = 1L, name = name, info = "", sequence = 0L,
   tables = list(), analyses = list(), graphs = list(), layouts = list())
 
 project_add <- function(project, section, record) {
+  # Names may be edited, but stable IDs come from a project-wide sequence so
+  # graph and layout references do not depend on the visible sheet name.
   existing <- vapply(project[[section]], function(e) e$name, character(1))
   record$name <- tail(make.unique(c(existing, record$name), sep = " #"), 1)
   project$sequence <- project$sequence + 1L
@@ -31,16 +36,22 @@ unpack_frame <- function(x) {
 
 project_json <- function(project) {
   payload <- project
-  payload$tables <- lapply(payload$tables, function(t) { t$data <- pack_frame(t$data); t })
+  payload$tables <- lapply(payload$tables, function(t) { t$data <- pack_frame(t$data); t$nested_config <- pack_nested_config(t$nested_config); t })
   payload$analyses <- lapply(payload$analyses, function(a) {
     a$result <- NULL; a$input_data <- pack_frame(a$input_data); a$time <- as.character(a$time)
-    if (!is.null(a$worksheet)) a$worksheet$data <- pack_frame(a$worksheet$data)
+    a$config <- pack_nested_config(a$config)
+    if (!is.null(a$worksheet)) {
+      a$worksheet$data <- pack_frame(a$worksheet$data)
+      a$worksheet$nested_config <- pack_nested_config(a$worksheet$nested_config)
+    }
     a
   })
   jsonlite::toJSON(payload, auto_unbox = TRUE, na = "null", null = "null", digits = NA, pretty = TRUE)
 }
 
 read_project <- function(text) {
+  # Reconstruct and validate a complete project before the server replaces its
+  # current workspace. Saved fits are recalculated, not trusted serialized objects.
   p <- jsonlite::fromJSON(text, simplifyVector = FALSE)
   assert(identical(p$version, 1L) && length(p$name) == 1 && is.character(p$name), "Unsupported LabStats project file.")
   assert(is.numeric(p$sequence) && length(p$sequence) == 1 && p$sequence >= 0, "Invalid project sequence.")
@@ -55,7 +66,7 @@ read_project <- function(text) {
   }
   p$tables <- lapply(p$tables, function(t) {
     t$data <- unpack_frame(t$data)
-    assert(t$type %in% c("column", "xy", "other") && t$layout %in% c("wide", "long"), "Invalid table type.")
+    assert(t$type %in% c("column", "xy", "other", "nested") && t$layout %in% c("wide", "long"), "Invalid table type.")
     t$columns <- as.character(unlist(t$columns)); t
   })
   p$analyses <- lapply(p$analyses, function(a) {
@@ -84,6 +95,8 @@ read_project <- function(text) {
 }
 
 normalize_wide <- function(data, columns, baseline, operation = "ratio") {
+  # Transform each row against its own baseline; leave undefined divisions or
+  # logarithms blank and return an audit so the derived table explains exclusions.
   assert(operation %in% c("ratio", "percent", "change", "percent_change", "log"), "Unknown transformation.")
   assert(length(columns) > 0 && all(columns %in% names(data)), "Select measurement columns to transform.")
   for (n in columns) numeric_column(data, n)

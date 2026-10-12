@@ -1,3 +1,6 @@
+# Statistical option regressions sourced by run_tests.R with its shared helpers.
+# Cover automatic missing-data routing, selected/reversed comparisons, FDR/rank
+# procedures, covariance policies, diagnostics and project/standalone reproducibility.
 local({
   d <- demo_data("groups")
   base <- list(y = "response", group = "group", id = "subject", adjustment = "sidak")

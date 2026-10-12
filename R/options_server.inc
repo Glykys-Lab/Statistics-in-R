@@ -1,9 +1,14 @@
 # Settings and browser preferences; no experimental data is stored in preferences.
+# Sourced inside app.R's server so inputs, outputs and session refer to that user.
+# Translate applicable controls into configuration, synchronize alpha/confidence,
+# and validate browser defaults before restoring dynamically generated controls.
 one_way_methods <- c("anova", "welch_anova", "kruskal", "friedman", "rm_anova", "mixed", "rm_auto", "log_rm_anova", "log_mixed", "log_rm_auto")
 repeated_methods <- c("rm_anova", "mixed", "rm_auto", "log_rm_anova", "log_mixed", "log_rm_auto")
 input_or <- function(id, fallback) { value <- input[[id]]; if (is.null(value)) fallback else value }
 pending_preferences <- reactiveVal(list())
 advanced_config <- reactive({
+  # Ignore settings from unrelated methods so hidden controls cannot make a
+  # completed analysis appear stale or change the calculation unexpectedly.
   m <- input$method; req(m); z <- list()
   if (m %in% one_way_methods) {
     z <- list(reverse_comparisons = isTRUE(input$reverse_comparisons), report_adjusted_p = input_or("report_adjusted_p", TRUE), report_descriptive = input_or("report_descriptive", TRUE))
@@ -48,6 +53,8 @@ preference_numbers <- list(alpha = c(.001, .2), confidence = c(.8, .999), fdr_q 
 preference_checks <- c("glm_initial", "reverse_comparisons", "report_adjusted_p", "report_descriptive", "report_goodness", "report_effects", "report_aicc", "graph_comparison", "graph_ranks", "graph_differences", "graph_residual", "graph_homoscedasticity", "graph_residual_qq", "graph_residual_heatmap", "residual_normality", "residual_variance")
 preferences <- reactiveVal(list())
 restore_preferences <- function(values) {
+  # Browser storage is untrusted input: accept only known scalar fields, legal
+  # choices and bounded numbers. Table mappings and measurements are not defaults.
   req(is.list(values), length(values) <= 50); accepted <- list()
   for (id in intersect(names(values), c(names(preference_choices), names(preference_numbers), preference_checks))) {
     value <- values[[id]]

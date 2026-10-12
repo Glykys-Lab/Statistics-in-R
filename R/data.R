@@ -1,3 +1,7 @@
+# Data boundary for LabStats: examples, file/paste import, worksheet editing and
+# conversion to analysis rows. Keep column names, missing values and table order.
+# reproduction_script() embeds the data and analysis code in a standalone R file;
+# it is an export containing measurements, not just a link back to this project.
 demo_data <- function(name = "groups") {
   switch(name,
     groups = data.frame(subject = rep(sprintf("S%02d", 1:8), 3), group = rep(c("Control", "Drug A", "Drug B"), each = 8),
@@ -19,6 +23,8 @@ validate_import <- function(data) {
 }
 
 read_uploaded_table <- function(file, separator = ",", decimal = ".", sheet = NULL) {
+  # Read only the selected upload and Excel sheet; blank numeric fields become NA.
+  # validate_import checks the resulting table before it enters the workspace.
   assert(is.data.frame(file) && nrow(file) == 1, "Select one uploaded file to analyze.")
   extension <- tolower(tools::file_ext(file$name))
   if (extension %in% c("xlsx", "xls")) {
@@ -50,6 +56,8 @@ paste_table <- function(text, decimal = ".") {
 }
 
 edit_cell <- function(data, row, column, value, decimal = ".") {
+  # Preserve the existing column type. Clearing a numeric cell records missing
+  # data, while a nonnumeric edit must fail rather than alter the whole column.
   assert(length(row) == 1 && row %in% seq_len(nrow(data)) && length(column) == 1 && column %in% seq_len(ncol(data)), "Select a valid table cell.")
   text <- trimws(value)
   if (is.numeric(data[[column]])) {
@@ -73,11 +81,16 @@ wide_to_long <- function(data, columns, id = "") {
 }
 
 reproduction_script <- function(data, config, plot_options = list(), graph_kind = "raw", worksheet = NULL) {
+  # Embed helpers and optional nested references so the export can run from a
+  # different directory. Worksheet metadata is limited to what result sheets need.
   if (!is.null(worksheet)) worksheet <- worksheet[intersect(c("name", "layout", "columns", "data"), names(worksheet))]
   c("# LabStats reproducible analysis: data and functions are embedded below.",
     "# This file contains your data. Share it only with intended recipients.",
     "# Required packages: ggplot2; survival for survival; nlme for mixed effects; nortest for residual normality.",
-    "# install.packages(c('ggplot2', 'survival', 'nlme', 'nortest'))", "",
+    if (config$method %in% nested_methods) "# Nested models additionally need lme4, lmerTest, emmeans, gridExtra, tidyr, dplyr, commonmark, svglite, ggbeeswarm and zip.",
+    if (config$method %in% nested_methods) "# install.packages(c('ggplot2','nlme','lme4','lmerTest','emmeans','gridExtra','tidyr','dplyr','commonmark','svglite','ggbeeswarm','zip'))" else "# install.packages(c('ggplot2', 'survival', 'nlme', 'nortest'))", "",
+    readLines(file.path("R", "nested.R"), warn = FALSE, encoding = "UTF-8"), "",
+    if (config$method %in% nested_methods) c("embedded_nested_references <-", capture.output(dput(setNames(lapply(c("between-groups", "repeated"), function(n) readLines(file.path("R", paste0("nested-reference-", n, ".inc")), warn = FALSE, encoding = "UTF-8")), c("between-groups", "repeated")))), ""),
     readLines(file.path("R", "options.R"), warn = FALSE), "",
     readLines(file.path("R", "results.R"), warn = FALSE), "",
     readLines(file.path("R", "analysis.R"), warn = FALSE), "",
@@ -87,11 +100,12 @@ reproduction_script <- function(data, config, plot_options = list(), graph_kind 
     "graph_kind <-", capture.output(dput(graph_kind)),
     "worksheet <-", capture.output(dput(worksheet)),
     "result <- run_analysis(input_data, config)",
+    if (config$method %in% nested_methods) c("write_nested_bundle(result, 'nested_analysis.zip')", "writeLines(result$report_markdown, 'nested_analysis.md')", "writeLines(nested_html_report(result), 'nested_analysis.html')", "if (interactive() && requireNamespace('rstudioapi', quietly=TRUE) && rstudioapi::isAvailable()) rstudioapi::viewer(normalizePath('nested_analysis.html'))"),
     "writeLines(analysis_report(result, worksheet = worksheet), 'analysis_report.txt')",
     "tables <- result_export_tables(result, worksheet = worksheet, options = config)",
     "for (name in names(tables)) write.csv(tables[[name]], paste0(name, '.csv'), row.names = FALSE)",
     "figure <- make_graph(result, graph_kind, plot_options)",
-    "ggplot2::ggsave('figure.pdf', figure, width = 7, height = 5)",
-    "ggplot2::ggsave('figure.png', figure, width = 7, height = 5, dpi = 300)",
-    "writeLines(capture.output(sessionInfo()), 'session_info.txt')", "print(figure)")
+    "save_result_figure(result, graph_kind, figure, 'figure.pdf', 'pdf')",
+    "save_result_figure(result, graph_kind, figure, 'figure.png', 'png')",
+    "writeLines(capture.output(sessionInfo()), 'session_info.txt')", "if (interactive()) draw_nested_graph(figure)")
 }

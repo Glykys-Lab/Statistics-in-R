@@ -1,6 +1,11 @@
 # LabStats analysis engine. This file can be sourced without starting the GUI.
+# run_analysis(data, config) validates the selected design and returns numeric
+# tables, fitted models, settings and audit notes. Formatting is handled elsewhere.
+# Subject matching uses IDs; complete-case tests and mixed models intentionally
+# handle missing measurements differently. Nested designs dispatch to nested.R.
 if (file.exists("R/options.R")) source("R/options.R", local = TRUE)
 if (file.exists("R/results.R")) source("R/results.R", local = TRUE)
+if (file.exists("R/nested.R")) source("R/nested.R", local = TRUE)
 analysis_methods <- c(
   "Descriptive statistics" = "summary", "Unpaired t test (Welch)" = "welch",
   "Unpaired t test (equal variance)" = "student", "Paired t test" = "paired_t",
@@ -14,6 +19,8 @@ analysis_methods <- c(
   "Automatic lognormal repeated ANOVA / mixed effects" = "log_rm_auto",
   "Lognormal repeated-measures ANOVA" = "log_rm_anova",
   "Lognormal mixed-effects model (REML)" = "log_mixed",
+  "Nested mixed model: repeated cells" = "nested_repeated",
+  "Nested mixed model: between groups" = "nested_between",
   "Normality and lognormality tests" = "normality",
   "Identify outliers (ROUT)" = "outliers",
   "Two-way ANOVA (balanced, independent)" = "two_way",
@@ -24,6 +31,8 @@ analysis_methods <- c(
 )
 
 method_note <- function(method) switch(method,
+  nested_repeated = "Repeated cells nested within slices and mice. Optional slice x condition effects and unequal cell noise; Satterthwaite inference from the supplied nested-model script.",
+  nested_between = "Different groups of cells nested within slices and mice. Separate mouse and slice random effects; optional per-condition slice and residual SDs, with Satterthwaite inference.",
   rm_auto = "Use repeated-measures ANOVA when all subjects have every selected condition; otherwise use REML mixed effects with the available observations.",
   log_rm_auto = "Choose repeated ANOVA or REML mixed effects based on completeness, using natural-log responses and geometric-mean comparisons.",
   summary = "Mean, SD, SEM, median, quartiles, and a t-based confidence interval for each group mean. Each row should represent an independent experimental unit.",
@@ -53,12 +62,14 @@ method_note <- function(method) switch(method,
 
 assert <- function(ok, message) if (!isTRUE(ok)) stop(message, call. = FALSE)
 numeric_column <- function(data, name) {
+  # Reject text and non-finite measurements rather than silently coercing them.
   assert(length(name) == 1L && name %in% names(data), "Select a valid numeric column.")
   assert(is.numeric(data[[name]]), paste0("Column '", name, "' must be numeric. Check for text, units, or decimal separators."))
   assert(!any(is.infinite(data[[name]])), paste0("Column '", name, "' contains infinite values."))
   data[[name]]
 }
 group_column <- function(data, name) {
+  # Preserve an explicit factor order or first appearance, never alphabetical order.
   assert(length(name) == 1L && name %in% names(data), "Select a valid group/category column.")
   x <- trimws(as.character(data[[name]])); x[x == ""] <- NA_character_
   order <- if (is.factor(data[[name]])) trimws(levels(data[[name]])) else unique(x)
@@ -91,7 +102,8 @@ pairwise_table <- function(object) {
 design_methods <- function(table_type = "column", family = "many", matched = FALSE,
                            distribution = "normal", variance = "unequal", repeated = "complete") {
   if (table_type == "xy") return(analysis_methods[analysis_methods %in% c("linear", "pearson", "spearman")])
-  if (table_type == "other") return(analysis_methods)
+  if (table_type == "nested") return(analysis_methods[analysis_methods %in% nested_methods])
+  if (table_type == "other") return(analysis_methods[!analysis_methods %in% nested_methods])
   if (family %in% c("normality", "outliers")) return(analysis_methods[analysis_methods == family])
   if (distribution == "lognormal" && matched && family == "many") return(analysis_methods[analysis_methods == switch(repeated, mixed = "log_mixed", auto = "log_rm_auto", "log_rm_anova")])
   method <- if (family == "summary") "summary" else if (family == "two") {
@@ -127,6 +139,8 @@ normality_table <- function(d, method, fit = NULL) {
 }
 
 repeated_anova <- function(d, correction = "gg") {
+  # Work on matched subject rows so the covariance used for GG correction has
+  # the same condition ordering as the repeated-measures model.
   fit <- lm(y ~ id + group, data = d)
   a <- anova(fit); k <- nlevels(d$group)
   wide <- matrix(d$y, ncol = k, byrow = TRUE)
@@ -319,6 +333,8 @@ mixed_epsilon <- function(d) {
 }
 
 rout_column <- function(x, q = .01, tolerance = 1e-9, maxiter = 1000L) {
+  # Identify unusually large deviations using a robust center/scale and FDR rule;
+  # the caller decides whether to flag observations or create cleaned data.
   n <- length(x); assert(all(is.finite(x)), "ROUT requires finite observed values.")
   assert(length(q) == 1 && is.finite(q) && q > 0 && q < 1, "ROUT Q must lie between 0 and 1.")
   location <- median(x); scale <- NA_real_; status <- "OK"; converged <- FALSE
@@ -352,6 +368,9 @@ rout_column <- function(x, q = .01, tolerance = 1e-9, maxiter = 1000L) {
 }
 
 run_analysis <- function(data, config) {
+  # Route hierarchical data before ordinary-column validation: nested models need
+  # Mouse/Slice/Cell columns rather than a single group and subject mapping.
+  if (config$method %in% nested_methods) return(run_nested_analysis(data, config))
   defaults <- list(method = "summary", y = NULL, group = NULL, x = NULL, id = NULL,
     factor2 = NULL, event = NULL, count = NULL, confidence = .95, adjustment = "holm", direction = "decreasing", sphericity = "gg",
     alpha = .05, comparisons = "all", control = NULL, scale = "raw", rout_q = .01,

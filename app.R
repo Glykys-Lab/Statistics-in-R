@@ -1,3 +1,7 @@
+# Application entry point: load the analysis modules and connect the Shiny UI to
+# per-session data, analysis snapshots, project navigation, graphs and downloads.
+# Launch from the project directory through launch.R or Shiny's Run App command.
+# Calculation functions live in R/ so they can also run without the browser.
 if (dir.exists(".R-library")) .libPaths(c(normalizePath(".R-library"), .libPaths()))
 required <- c("shiny", "ggplot2", "readxl", "survival", "nlme", "jsonlite", "nortest")
 missing <- required[!vapply(required, requireNamespace, logical(1), quietly = TRUE)]
@@ -14,6 +18,8 @@ options(shiny.maxRequestSize = 25 * 1024^2)
 source("R/ui.R", local = TRUE)
 
 server <- function(input, output, session) {
+  # Each browser session owns these values; edits must not overwrite an archived
+  # result or leak into another session's worksheet.
   saved <- reactiveVal(NULL)
   analysis_error <- reactiveVal(NULL)
   edited <- reactiveVal(NULL)
@@ -22,6 +28,7 @@ server <- function(input, output, session) {
   upload_states <- reactiveVal(list())
   source("R/workspace.inc", local = TRUE)
   source("R/options_server.inc", local = TRUE)
+  source("R/nested_server.inc", local = TRUE)
   observeEvent(input$import_data, {
     updateSelectInput(session, "source", selected = "upload")
     updateTabsetPanel(session, "tabs", selected = "data")
@@ -55,6 +62,7 @@ server <- function(input, output, session) {
     choices <- switch(input$table_type,
       column = c("Three independent groups" = "groups", "Matched before / after" = "paired", "Repeated measures with missing values" = "missing"),
       xy = c("XY measurements" = "xy"),
+      nested = c("Repeated cells nested in slices and mice" = "nested_repeated", "Between groups of mice" = "nested_between"),
       other = c("Three groups" = "groups", "Matched before / after" = "paired", "XY measurements" = "xy", "Dose-response" = "dose", "Category counts" = "contingency", "Time to event" = "survival", "Two-factor experiment" = "factorial"))
     selectInput("demo", "Example table", choices)
   })
@@ -63,9 +71,10 @@ server <- function(input, output, session) {
     updateSelectInput(session, "layout", selected = layout)
     updateTabsetPanel(session, "tabs", selected = "data")
   })
-  observeEvent(list(input$table_type, input$family, input$matching, input$distribution, input$variance, input$repeated), {
+  observeEvent(list(input$table_type, input$family, input$matching, input$distribution, input$variance, input$repeated, input$nested_design), {
     req(input$table_type)
     choices <- design_methods(input$table_type, if (is.null(input$family)) "many" else input$family, identical(input$matching, "matched"), if (is.null(input$distribution)) "normal" else input$distribution, if (is.null(input$variance)) "unequal" else input$variance, if (is.null(input$repeated)) "complete" else input$repeated)
+    if (identical(input$table_type, "nested")) choices <- choices[choices == if (identical(input$nested_design, "between")) "nested_between" else "nested_repeated"]
     selected <- isolate(input$method)
     if (is.null(selected) || !selected %in% choices) selected <- unname(choices[1])
     updateSelectInput(session, "method", choices = choices, selected = selected)
@@ -93,6 +102,8 @@ server <- function(input, output, session) {
   })
   file_is_excel <- reactive({ tolower(tools::file_ext(uploaded_file()$name)) %in% c("xlsx", "xls") })
   upload_key <- reactive({
+    # Parsing settings identify an upload state too: the same file interpreted
+    # with a different sheet or decimal mark must not reuse incompatible edits.
     file <- uploaded_file()
     if (file_is_excel()) return(paste(file$datapath, "excel", if (is.null(input$sheet)) "" else input$sheet, sep = "\r"))
     extension <- tolower(tools::file_ext(file$name))
@@ -107,9 +118,12 @@ server <- function(input, output, session) {
     selectInput("sheet", "Excel worksheet", sheets)
   })
   base_data <- reactive({
+    # Keep the source table separate from edits and the mapped analysis table.
+    # This lets file switching restore edits while exports retain the original IDs.
     if (input$source == "workspace") { req(opened_table()); return(opened_table()$data) }
     if (input$source == "demo") {
       req(input$demo)
+      if (input$table_type == "nested") return(nested_demo(identical(input$demo, "nested_between")))
       if (input$table_type == "column") { req(input$demo %in% c("groups", "paired", "missing")); return(column_demo(input$demo)) }
       return(demo_data(input$demo))
     }
@@ -177,6 +191,7 @@ server <- function(input, output, session) {
   })
   data <- reactive({
     d <- raw_data()
+    if (identical(input$table_type, "nested")) return(d)
     if (input$table_type != "xy" && input$layout == "wide") {
       req(input$wide_columns)
       tryCatch(wide_to_long(d, input$wide_columns, if (is.null(input$wide_id)) "" else input$wide_id), error = function(e) validate(need(FALSE, conditionMessage(e))))
@@ -184,6 +199,10 @@ server <- function(input, output, session) {
   })
   observeEvent(input$demo, {
     if (input$source != "demo") return()
+    if (input$table_type == "nested") {
+      updateRadioButtons(session, "nested_design", selected = if (input$demo == "nested_between") "between" else "repeated")
+      return()
+    }
     if (input$table_type == "column") {
       updateSelectInput(session, "layout", selected = "wide")
       updateSelectInput(session, "family", selected = if (input$demo == "paired") "two" else "many")
@@ -196,6 +215,7 @@ server <- function(input, output, session) {
     updateSelectInput(session, "method", selected = switch(input$demo, groups = "anova", paired = "paired_t", xy = "linear", dose = "dose", contingency = "fisher", survival = "survival", factorial = "two_way"))
   }, ignoreInit = TRUE)
   output$mapping <- renderUI({
+    if (identical(input$table_type, "nested")) return(nested_mapping_ui(raw_data(), input))
     d <- if (input$table_type != "xy" && input$layout == "wide") {
       req(input$wide_columns)
       wide_to_long(base_data(), input$wide_columns, if (is.null(input$wide_id)) "" else input$wide_id)
@@ -218,6 +238,7 @@ server <- function(input, output, session) {
   # Track only fields used by the selected method, so hidden controls cannot change results.
   current_config <- reactive({
     z <- config(); m <- z$method; req(length(m) == 1, nzchar(m))
+    if (m %in% nested_methods) return(nested_config(input, raw_data()))
     keys <- c("method", "confidence", "alpha")
     if (m %in% c("chisq", "fisher")) keys <- c(keys, "group", "factor2", "count")
     else if (m %in% c("pearson", "spearman", "linear", "dose")) keys <- c(keys, "x", "y", if (m == "dose") "direction")
@@ -242,6 +263,8 @@ server <- function(input, output, session) {
   })
   result <- reactive({ req(saved()); validate(need(is_current(), "Data or analysis settings changed. Run the analysis again to view or export results.")); saved()$result })
   observeEvent(input$run, {
+    # Analyze is the calculation boundary. Save inputs and settings with the result
+    # so later worksheet changes can be detected instead of silently changing it.
     # Reject queued repeat clicks before clearing the result or creating saved sheets.
     if (isTRUE(tryCatch(analysis_unchanged(), error = function(e) FALSE))) return()
     saved(NULL); analysis_error(NULL)
@@ -256,16 +279,17 @@ server <- function(input, output, session) {
         "Paste a table and click Use pasted table before clicking Analyze.")
       if (identical(input$source, "workspace")) assert(!is.null(opened_table()),
         "Open a saved project table or choose another data source before clicking Analyze.")
-      if (!identical(input$table_type, "xy") && identical(input$layout, "wide")) assert(isTruthy(input$wide_columns),
+      if (!input$table_type %in% c("xy", "nested") && identical(input$layout, "wide")) assert(isTruthy(input$wide_columns),
         "Select the measurement columns to analyze.")
       d <- data(); cfg <- current_config()
       if (input$table_type == "column" && input$family == "many") assert(nlevels(group_column(d, cfg$group)) >= 3, "Select at least three group columns, or choose the two-group comparison.")
-      res <- run_analysis(d, cfg)
+      res <- if (cfg$method %in% nested_methods) withProgress(message = "Fitting nested models and preparing reports", value = .15, run_analysis(d, cfg)) else run_analysis(d, cfg)
       table_id <- save_current_table()
       p <- project(); name <- paste(names(analysis_methods)[match(res$method, analysis_methods)], "of", p$tables[[table_id]]$name)
       added <- project_add(p, "analyses", list(name = name, table_id = table_id, worksheet = p$tables[[table_id]], result = res, input_data = d, config = cfg, time = as.character(Sys.time())))
       p <- added$project; analysis_id <- added$id
-      for (kind in unique(c("raw", "normal_qq", "lognormal_qq", if (is.null(cfg$diagnostic_graphs)) "comparison" else cfg$diagnostic_graphs))) {
+      kinds <- if (isTRUE(res$nested)) names(res$graphs) else unique(c("raw", "normal_qq", "lognormal_qq", if (is.null(cfg$diagnostic_graphs)) "comparison" else cfg$diagnostic_graphs))
+      for (kind in kinds) {
         possible <- tryCatch({ make_graph(res, kind); TRUE }, error = function(e) FALSE)
         if (possible) p <- project_add(p, "graphs", list(name = paste(names(graph_kinds)[match(kind, graph_kinds)], "of", name), analysis_id = analysis_id, kind = kind, options = list()))$project
       }
@@ -288,9 +312,10 @@ server <- function(input, output, session) {
     })
   })
   output$method_help <- renderText(method_note(input$method))
-  output$sheet_title <- renderText(if (identical(input$source, "workspace")) opened_table()$name else switch(input$table_type, column = "Column data table", xy = "XY data table", "Data table"))
+  output$sheet_title <- renderText(if (identical(input$source, "workspace")) opened_table()$name else switch(input$table_type, column = "Column data table", xy = "XY data table", nested = "Nested-model data table", "Data table"))
   output$data_info <- renderText(paste(nrow(raw_data()), "rows |", ncol(raw_data()), "columns"))
   output$table_help <- renderUI({
+    if (identical(input$table_type, "nested")) return(p("Repeated models: one row per Mouse / Slice / Cell and one numeric column per condition. Between-group models: Mouse, Slice, Cell, Condition and a numeric measurement column. ID combinations identify the nested units; IDs must be present even when a measurement is blank. Blank measurements are omitted individually."))
     if (input$table_type == "xy") p("Enter X in one numeric column and Y in another. Choose simple linear regression, Pearson correlation, or Spearman correlation. If you have several Y columns, select the one to analyze.")
     else p("Each measurement column is a group or condition. For matched data, values in the same row belong to the same subject. For independent data, rows do not imply matching. Subject IDs are optional in wide tables. Missing values are audited; complete-case matched tests exclude incomplete subjects, while mixed-effects analysis retains their observed values.")
   })
@@ -312,7 +337,7 @@ server <- function(input, output, session) {
     if (is.null(saved())) return(div(class = "status-bar", span(class = "status-dot"), "Data worksheet", span(class = "status-detail", "Enter data and click Analyze")))
     if (!is_current()) return(div(class = "status-bar stale", "Settings changed \u2014 run the analysis again."))
     a <- result()$tables$data_audit
-    div(class = "status-bar", span(class = "status-dot"), if (archive_view()) "Saved analysis snapshot" else "Analysis complete", span(class = "status-detail", paste(a$used_rows, "rows used /", a$excluded_rows, "excluded")))
+    div(class = "status-bar", span(class = "status-dot"), if (archive_view()) "Saved analysis snapshot" else "Analysis complete", span(class = "status-detail", paste(a$used_rows, if (isTRUE(result()$nested)) "measurements used /" else "rows used /", a$excluded_rows, "excluded")))
   })
   output$results_header <- renderUI({ r <- result(); tagList(span(class = "eyebrow", "ANALYSIS RESULTS"), h3(names(analysis_methods)[match(r$method, analysis_methods)])) })
   output$notes <- renderUI({ r <- result(); tagList(div(class = "method-note", lapply(r$notes, tags$p)), if (length(r$warnings)) div(class = "warning-note", h4("Review before interpreting"), lapply(r$warnings, tags$p))) })
@@ -350,18 +375,18 @@ server <- function(input, output, session) {
     z[!vapply(z, is.null, logical(1))]
   })
   figure <- reactive(make_graph(result(), if (is.null(input$graph_kind)) "raw" else input$graph_kind, plot_options()))
-  output$figure <- renderPlot(print(figure()), res = 110)
+  output$figure <- renderPlot(draw_nested_graph(figure()), res = 110)
   output$diagnostic_help <- renderUI({ r <- result(); if (is.null(diagnostic_plot(r))) p("Residual diagnostics are available for ANOVA, mixed-effects, linear regression, and dose-response fits.") else p("Look for changing spread, curvature, and outliers. For mixed-effects models, these are conditional residuals. This plot does not establish that model assumptions hold.") })
-  output$diagnostics <- renderPlot({ p <- diagnostic_plot(result()); if (!is.null(p)) print(p) }, res = 100)
-  output$normality_figure <- renderPlot({ p <- normality_plot(result()); if (!is.null(p)) print(p) }, res = 100)
+  output$diagnostics <- renderPlot({ p <- diagnostic_plot(result()); if (!is.null(p)) draw_nested_graph(p) }, res = 100)
+  output$normality_figure <- renderPlot({ p <- normality_plot(result()); if (!is.null(p)) draw_nested_graph(p) }, res = 100)
   output$settings <- renderPrint({ result(); print(saved()$config) })
   output$download_data <- downloadHandler(filename = "input_data.csv", content = function(file) write.csv(data(), file, row.names = FALSE))
   output$download_table <- downloadHandler(filename = function() paste0(input$export_table, ".csv"), content = function(file) { tables <- result_export_tables(result(), worksheet = saved()$worksheet, options = display_options()); req(input$export_table %in% names(tables)); write.csv(tables[[input$export_table]], file, row.names = FALSE) })
   output$download_report <- downloadHandler(filename = "analysis_report.txt", content = function(file) writeLines(c(analysis_report(result(), display_options(), saved()$worksheet), "", "SETTINGS", capture.output(dput(saved()$config))), file))
   output$download_script <- downloadHandler(filename = "reproduce_analysis.R", content = function(file) { result(); writeLines(reproduction_script(saved()$input_data, modifyList(saved()$config, display_options()), plot_options(), if (is.null(input$graph_kind)) "raw" else input$graph_kind, saved()$worksheet), file) })
   output$download_session <- downloadHandler(filename = "session_info.txt", content = function(file) writeLines(capture.output(sessionInfo()), file))
-  output$download_png <- downloadHandler(filename = "figure.png", content = function(file) ggplot2::ggsave(file, figure(), width = 7, height = 5, dpi = 300, bg = "white"))
-  output$download_pdf <- downloadHandler(filename = "figure.pdf", content = function(file) ggplot2::ggsave(file, figure(), width = 7, height = 5, device = "pdf", bg = "white"))
+  output$download_png <- downloadHandler(filename = "figure.png", content = function(file) save_result_figure(result(), input$graph_kind, figure(), file, "png"))
+  output$download_pdf <- downloadHandler(filename = "figure.pdf", content = function(file) save_result_figure(result(), input$graph_kind, figure(), file, "pdf"))
 }
 
 shinyApp(ui, server)

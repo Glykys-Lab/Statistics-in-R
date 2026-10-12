@@ -1,5 +1,10 @@
+# Main Shiny page: navigator, import/edit worksheet, analysis options, results,
+# graphs, layouts, project information and exports. Input IDs form the contract
+# with app.R and the server includes; conditional panels only control visibility.
+# Detailed option and result components are built by the sourced UI helpers.
 source("R/options_ui.R", local = TRUE)
 source("R/results_ui.R", local = TRUE)
+source("R/nested_ui.R", local = TRUE)
 ui <- fluidPage(
   theme = bslib::bs_theme(version = 5, bg = "#EDF1F5", fg = "#25364A", primary = "#2467AE", base_font = "system-ui"),
   tags$head(tags$link(rel = "stylesheet", type = "text/css", href = paste0("style.css?v=", unname(tools::md5sum("www/style.css")))), tags$script(src = paste0("worksheet.js?v=", unname(tools::md5sum("www/worksheet.js"))))),
@@ -16,7 +21,7 @@ ui <- fluidPage(
       div(class = "project-browser", uiOutput("project_tree")),
       tags$details(open = "open", tags$summary("Family"), uiOutput("family_tree")),
       tags$hr(),
-      radioButtons("table_type", "Table type", c("Column" = "column", "XY" = "xy", "Other analyses" = "other"), inline = TRUE),
+      radioButtons("table_type", "Table type", c("Column" = "column", "XY" = "xy", "Nested models" = "nested", "Other analyses" = "other"), inline = TRUE),
       div(class = "navigator", actionButton("nav_data", "01  Data tables", class = "nav-sheet"), actionButton("nav_results", "02  Results", class = "nav-sheet"), actionButton("nav_graph", "03  Graphs", class = "nav-sheet")),
       tags$hr(), h3("Data source"),
       selectInput("source", NULL, c("Saved project table" = "workspace", "Example table" = "demo", "New blank table" = "blank", "Paste from spreadsheet" = "paste", "Import CSV / Excel" = "upload"), selected = "demo"),
@@ -25,7 +30,7 @@ ui <- fluidPage(
       conditionalPanel("input.source == 'paste'", p(class = "hint", "Paste a header row and values in the Data table tab. Tabs, commas, and semicolons are accepted.")),
       conditionalPanel("input.source == 'upload'", p(class = "hint", "Choose your files using Browse in the Data table tab.")),
       selectInput("decimal", "Decimal mark", c("Period" = ".", "Comma" = ",")),
-      conditionalPanel("input.table_type != 'xy'", selectInput("layout", "Table layout", c("Column: one group per column" = "wide", "Long: one observation per row" = "long")),
+      conditionalPanel("input.table_type != 'xy' && input.table_type != 'nested'", selectInput("layout", "Table layout", c("Column: one group per column" = "wide", "Long: one observation per row" = "long")),
         conditionalPanel("input.layout == 'wide'", uiOutput("wide_ui"), p(class = "hint", "For matched data, each row is one subject. Leave missing observations blank."))),
       tags$hr(), h3("Analyze"),
       conditionalPanel("input.table_type == 'column'",
@@ -42,7 +47,7 @@ ui <- fluidPage(
     column(9,
       uiOutput("status"),
       div(class = "panel-card main-panel", tabsetPanel(id = "tabs", selected = "data",
-        tabPanel("Analysis options", value = "options", div(class = "tab-body", analysis_options_ui())),
+        tabPanel("Analysis options", value = "options", div(class = "tab-body", conditionalPanel("input.table_type != 'nested'", analysis_options_ui()), conditionalPanel("input.table_type == 'nested'", nested_options_ui()))),
         tabPanel("Data table", value = "data", div(class = "tab-body",
           conditionalPanel("input.source == 'upload'", div(class = "import-panel",
             h3("Import data tables"),
@@ -64,11 +69,11 @@ ui <- fluidPage(
           tags$details(class = "result-management", tags$summary("Analysis name and calculation notes"),
             textInput("analysis_name", "Saved analysis name", ""), actionButton("rename_analysis", "Rename analysis"), uiOutput("notes")),
           uiOutput("cleaned_action"),
-          uiOutput("results_tables"))),
+          uiOutput("results_tables"), uiOutput("nested_report_view"))),
         tabPanel("Graph", value = "figure", div(class = "tab-body",
           fluidRow(column(6, selectInput("graph_kind", "Graph type", graph_kinds)), column(6, textInput("graph_name", "Saved graph name", ""))),
           actionButton("save_graph", "Save graph"),
-          tags$details(tags$summary("Graph settings"),
+          conditionalPanel("input.table_type != 'nested'", tags$details(tags$summary("Graph settings"),
           fluidRow(column(4, selectInput("plot_style", "Column graph", c("Points + mean" = "points", "Box + points" = "box", "Violin + points" = "violin"))),
             column(4, selectInput("error_style", "Mean error bars", c("Confidence interval" = "ci", "Standard deviation" = "sd", "Standard error" = "sem", "None" = "none"))),
             column(4, textInput("plot_title", "Graph title", ""))),
@@ -76,8 +81,11 @@ ui <- fluidPage(
           tags$details(tags$summary("Format symbols, lines and axes"), fluidRow(
             column(4, selectInput("palette_name", "Colors", c("Prism colors" = "prism", "LabStats colors" = "color", "Monochrome" = "mono")), selectInput("symbol", "Symbol", c("Filled circle" = 16, "Open circle" = 1, "Square" = 15, "Triangle" = 17))),
             column(4, numericInput("point_size", "Symbol size", 2.6, min = 1, max = 6, step = .2), selectInput("legend", "Legend", c("Bottom" = "bottom", "Right" = "right", "Hidden" = "none"))),
-            column(4, selectInput("x_angle", "X label angle", c("Horizontal" = 0, "45 degrees" = 45, "Vertical" = 90)), checkboxInput("connect", "Connect matched subjects", TRUE), checkboxInput("varied_symbols", "Different symbol per column", FALSE), checkboxInput("show_stars", "Show test p-value and stars", FALSE))))),
-          plotOutput("figure", height = "430px"), div(class = "download-row", downloadButton("download_png", "PNG \u00b7 300 dpi"), downloadButton("download_pdf", "PDF \u00b7 vector")),
+            column(4, selectInput("x_angle", "X label angle", c("Horizontal" = 0, "45 degrees" = 45, "Vertical" = 90)), checkboxInput("connect", "Connect matched subjects", TRUE), checkboxInput("varied_symbols", "Different symbol per column", FALSE), checkboxInput("show_stars", "Show test p-value and stars", FALSE)))))),
+          conditionalPanel("input.graph_kind != 'publication'", plotOutput("figure", height = "430px")),
+          conditionalPanel("input.graph_kind == 'publication'", imageOutput("publication_preview", height = "auto")),
+          div(class = "download-row", downloadButton("download_png", "PNG"), downloadButton("download_pdf", "PDF \u00b7 vector")),
+          conditionalPanel("input.table_type == 'nested'", p(class = "hint", "Nested figures use the Figures tab in Analysis options. Select Publication SuperPlot for the final-sized panel, key and comparison strip. SVG / PDF / EPS at the configured size are in the download bundle.")),
           tags$details(tags$summary("Assumption diagnostics"), h4("Model diagnostics"), uiOutput("diagnostic_help"), plotOutput("diagnostics", height = "260px"),
           h4("Normality diagnostics"), p(class = "hint", "Shapiro-Wilk results are in the Results sheet. QQ plots show group values, within-subject differences, or model residuals as appropriate. Normality diagnostics do not establish independence or select a test."), plotOutput("normality_figure", height = "340px")))),
         tabPanel("Layouts", value = "layouts", div(class = "tab-body", h3("Arrange saved graphs"),
@@ -92,6 +100,7 @@ ui <- fluidPage(
         tabPanel("Export & R code", value = "export", div(class = "tab-body", h3("Reproduce this analysis"),
           p("The script includes your input data, analysis settings, tables, and graph options. Run it in R to reproduce the analysis."),
           div(class = "download-row", downloadButton("download_script", "Reproducible R script"), downloadButton("download_report", "Analysis report"), downloadButton("download_session", "R session details")),
+          uiOutput("nested_exports"),
           tags$hr(), selectInput("export_table", "Result table", choices = character()), downloadButton("download_table", "Export table CSV"), h4("Analysis settings"), verbatimTextOutput("settings")))
       ))
     )

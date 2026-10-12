@@ -1,4 +1,7 @@
 # Sourced inside the Shiny server: project navigation and immutable analysis snapshots.
+# Own the session's project records and selected-sheet state. Loading a worksheet
+# restores editable inputs; opening an archived result preserves its saved analysis.
+# Transformations create derived tables and provenance instead of replacing sources.
 project <- reactiveVal(new_project())
 opened_table <- reactiveVal(NULL)
 active_table_id <- reactiveVal(NULL)
@@ -13,6 +16,7 @@ notify_error <- function(e) showNotification(conditionMessage(e), type = "error"
 guard <- function(code) tryCatch(force(code), error = notify_error)
 
 load_table <- function(id) {
+  # Defer selector updates until Shiny has mounted the controls for the new table.
   t <- project()$tables[[id]]; req(t)
   active_table_id(id); working_table_id(id); opened_table(t); edited(NULL); saved(NULL); archive_view(FALSE)
   select_sheet("tables", id)
@@ -23,6 +27,7 @@ load_table <- function(id) {
   session$onFlushed(function() {
     updateSelectInput(session, "wide_columns", selected = t$columns)
     updateSelectInput(session, "wide_id", selected = t$id_column)
+    restore_nested_config(t$nested_config)
   }, once = TRUE)
   updateTabsetPanel(session, "tabs", selected = "data")
 }
@@ -31,9 +36,9 @@ save_current_table <- function(copy = FALSE, name = input$table_name, d = raw_da
   assert(!is.null(d) && nrow(d) > 0, "Enter or load a table first.")
   p <- isolate(project()); id <- isolate(working_table_id())
   record <- list(name = if (is.null(name) || !nzchar(trimws(name))) "Untitled table" else trimws(name),
-    type = input$table_type, layout = if (input$table_type == "xy") "long" else input$layout,
+    type = input$table_type, layout = if (input$table_type == "nested") if (identical(input$nested_design, "between")) "long" else "wide" else if (input$table_type == "xy") "long" else input$layout,
     columns = names(d)[names(d) %in% input$wide_columns], id_column = if (is.null(input$wide_id)) "" else input$wide_id,
-    data = d, provenance = provenance)
+    data = d, provenance = provenance, nested_config = if (identical(input$table_type, "nested")) isolate(current_config()) else NULL)
   if (!copy && !is.null(id) && id %in% names(p$tables)) {
     record$id <- id; p$tables[[id]] <- record
   } else { added <- project_add(p, "tables", record); p <- added$project; id <- added$id }
@@ -83,6 +88,8 @@ output$family_tree <- renderUI({
 })
 
 open_analysis <- function(id) {
+  # Archive view intentionally bypasses live-input freshness checks: display the
+  # stored snapshot while retaining the user's separate working worksheet.
   a <- project()$analyses[[id]]; req(a)
   saved(a); archive_view(TRUE); active_table_id(a$table_id)
   select_sheet("analyses", id)
@@ -166,6 +173,7 @@ observeEvent(project(), {
   updateSelectInput(session, "layout_graphs", choices = choices, selected = intersect(isolate(input$layout_graphs), names(graphs)))
 })
 layout_entries <- reactive({
+  # Saved graph settings point to the exact analysis snapshot used to create them.
   ids <- input$layout_graphs; req(length(ids))
   p <- project(); assert(all(ids %in% names(p$graphs)), "Select saved graphs.")
   lapply(ids, function(id) { g <- p$graphs[[id]]; g$result <- p$analyses[[g$analysis_id]]$result; g })
@@ -186,7 +194,7 @@ output$download_layout_png <- downloadHandler(filename = "layout.png", content =
   grDevices::png(file, width = 10, height = 7, units = "in", res = 300); on.exit(grDevices::dev.off()); draw_layout()
 })
 output$download_layout_pdf <- downloadHandler(filename = "layout.pdf", content = function(file) {
-  grDevices::pdf(file, width = 10, height = 7); on.exit(grDevices::dev.off()); draw_layout()
+  grDevices::cairo_pdf(file, width = 10, height = 7); on.exit(grDevices::dev.off()); draw_layout()
 })
 output$download_project <- downloadHandler(filename = "labstats_project.json", content = function(file) writeLines(project_json(project()), file, useBytes = TRUE))
 observeEvent(input$project_file, guard({

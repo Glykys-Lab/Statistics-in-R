@@ -1,3 +1,6 @@
+# Project and statistical reference checks sourced by run_tests.R with its fixtures.
+# Verify normality/lognormality, matching/GG inference, ROUT and baseline transforms,
+# then validate typed JSON round trips, immutable snapshots and saved figure layouts.
 source("R/project.R")
 
 # Published SciPy skew/kurtosis reference values on a nonsymmetric sample.

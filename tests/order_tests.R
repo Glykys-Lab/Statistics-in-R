@@ -1,3 +1,6 @@
+# Order regressions sourced by run_tests.R using its check/near helpers.
+# Deliberately reverse selector order and leave a first measurement blank to verify
+# that tables, contrasts, graph axes and legends still follow the worksheet sequence.
 # Exercise actual ggplot scales with the experimental sequence from the worksheet.
 steps <- c("Baseline2 - Baseline", "aCSF1 - Baseline", "aCSF2 - Baseline")
 worksheet <- data.frame(Subject = paste0("S", 1:8), check.names = FALSE)

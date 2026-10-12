@@ -1,4 +1,7 @@
 # Read-only result sheets. Calculations remain numeric in result$tables.
+# Describe spreadsheet rows, headers, cell types and highlights separately from
+# Shiny markup. The same sheet definitions drive browser tables and CSV exports.
+# Labeled statistical sheets have a row-label column; plain data frames do not.
 result_sheet <- function(title, columns, rows, note = "", headers = columns) list(title = title, columns = columns, headers = headers, rows = rows, note = note)
 sheet_row <- function(label = "", values = list(), kind = "data", types = "text", highlight = integer()) {
   list(label = label, values = as.list(values), kind = kind, types = rep(types, length.out = length(values)), highlight = highlight)
@@ -29,14 +32,16 @@ sheet_cell <- function(x, type = "text", options = list()) {
   as.character(x)
 }
 sheet_frame <- function(sheet, options = list()) {
+  # Apply display formatting only at this boundary; raw numerical exports use
+  # result$tables and retain the precision needed for downstream calculations.
   n <- length(sheet$columns)
   rows <- lapply(sheet$rows, function(row) {
     values <- vapply(seq_len(n), function(i) if (i <= length(row$values)) sheet_cell(row$values[[i]], row$types[i], options) else "", character(1))
-    c(row$label, values)
+    if (isFALSE(sheet$statistic_column)) values else c(row$label, values)
   })
   if (!length(rows)) return(data.frame())
   x <- as.data.frame(do.call(rbind, rows), stringsAsFactors = FALSE, check.names = FALSE)
-  names(x) <- c("Statistic / comparison", sheet$columns); x
+  names(x) <- if (isFALSE(sheet$statistic_column)) sheet$columns else c("Statistic / comparison", sheet$columns); x
 }
 descriptive_sheet <- function(result) {
   table <- result$tables$descriptive_statistics
@@ -166,8 +171,10 @@ tabular_sheet <- function(result, table_name = "") {
   result_sheet("Tabular results", columns, rows, headers = rep("", length(columns)))
 }
 dataframe_sheet <- function(table, title) {
-  result_sheet(title, names(table), lapply(seq_len(nrow(table)), function(i) sheet_row(values = as.list(table[i, , drop = FALSE]),
+  sheet <- result_sheet(title, names(table), lapply(seq_len(nrow(table)), function(i) sheet_row(values = as.list(table[i, , drop = FALSE]),
     types = vapply(names(table), function(n) if (is.numeric(table[[n]])) if (n %in% c("p_value", "adjusted_p_value", "Pr(>F)")) "p" else "number" else if (is.logical(table[[n]])) "decision" else "text", character(1)))))
+  sheet$statistic_column <- FALSE
+  sheet
 }
 cleaned_worksheet <- function(result, worksheet = NULL) {
   if (is.null(worksheet) || !identical(worksheet$layout, "wide")) return(result$tables$cleaned_data)
@@ -177,8 +184,16 @@ cleaned_worksheet <- function(result, worksheet = NULL) {
   d
 }
 result_sheets <- function(result, table_name = "", worksheet = NULL) {
+  # Arrange each analysis into useful result tabs. Worksheet metadata supplies
+  # original column names and counts when the fitted data omitted measurements.
   if (!nzchar(table_name) && !is.null(worksheet$name)) table_name <- worksheet$name
   t <- visible_result_tables(result); sheets <- list(); consumed <- character()
+  if (isTRUE(result$nested)) {
+    sheets <- lapply(names(result$formatted_tables), function(n) dataframe_sheet(result$formatted_tables[[n]], gsub("_", " ", n)))
+    names(sheets) <- names(result$formatted_tables)
+    attr(sheets, "additional") <- list()
+    return(sheets)
+  }
   if (result$method == "outliers") {
     x <- t$outlier_summary
     sheets$summary <- result_sheet("Summary", as.character(x$group), list(sheet_row("Method", kind = "section"), sheet_row(paste0("ROUT (Q = ", result$config$rout_q*100, "%)")), sheet_row(kind = "blank"), sheet_row("Number of points", kind = "section"),

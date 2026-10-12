@@ -1,3 +1,6 @@
+# Regression for correction controls that previously retained stale UI choices.
+# Check transitions between all/control comparisons and family-wise/FDR correction,
+# including pending browser defaults. Can initialize app_env when run independently.
 if (!exists("app_env")) {
   if (dir.exists(".R-library")) .libPaths(c(normalizePath(".R-library"), .libPaths()))
   app_env <- new.env(parent = globalenv())

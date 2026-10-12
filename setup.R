@@ -1,7 +1,11 @@
 # Run once from the project directory. Packages stay inside this project.
+# Install missing app and nested-model dependencies from CRAN into .R-library.
+# Excluding the site library makes this check reflect what the project itself
+# can load. This installs compatible packages; it does not lock package versions.
 dir.create(".R-library", showWarnings = FALSE)
 .libPaths(c(normalizePath(".R-library"), .Library), include.site = FALSE)
-packages <- c("shiny", "ggplot2", "readxl", "survival", "nlme", "jsonlite", "nortest")
+packages <- c("shiny", "ggplot2", "readxl", "survival", "nlme", "jsonlite", "nortest",
+  "lme4", "lmerTest", "emmeans", "gridExtra", "tidyr", "dplyr", "commonmark", "svglite", "ggbeeswarm", "zip", "rstudioapi")
 missing <- packages[!vapply(packages, requireNamespace, logical(1), quietly = TRUE)]
 if (length(missing)) {
   # Repair incomplete transitive dependencies as well as top-level packages.

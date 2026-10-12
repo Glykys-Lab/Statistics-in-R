@@ -1,3 +1,7 @@
+// Browser bridge for worksheet edits, navigator clicks and saved analysis defaults.
+// Send events to Shiny; validation and calculations belong to the R server.
+// A worksheet revision identifies the rendered table, and a nonce makes repeated
+// actions observable even when their other payload fields have not changed.
 function saveWorksheetCell(event) {
   const cell = event.target.closest('.worksheet-cell');
   if (!cell || !window.Shiny) return;
@@ -10,6 +14,7 @@ function saveWorksheetCell(event) {
 document.addEventListener('change', saveWorksheetCell, true);
 document.addEventListener('blur', saveWorksheetCell, true);
 document.addEventListener('click', function(event) {
+  // Delegate clicks because Shiny replaces navigator buttons as the project changes.
   const link = event.target.closest('.project-link');
   if (link && window.Shiny) Shiny.setInputValue('project_open', {
     kind: link.dataset.kind, key: link.dataset.key, nonce: Date.now()
@@ -27,6 +32,8 @@ document.addEventListener('keydown', function (event) {
 
 // Browser-local defaults contain analysis choices, never worksheet measurements.
 function initializeAnalysisDefaults() {
+  // Bind only after Shiny is available and restore storage after its connection
+  // is ready. The server validates these saved choices before using them.
   if (!window.Shiny || !window.jQuery) {
     window.setTimeout(initializeAnalysisDefaults, 50);
     return;

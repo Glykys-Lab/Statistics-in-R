@@ -1,3 +1,6 @@
+# Focused server checks sourced by server_tests.R; app_env supplies the server.
+# Follow advanced UI choices through configuration, automatic method selection,
+# diagnostic graph creation, FDR comparisons and validation of restored defaults.
 shiny::testServer(app_env$server, {
   session$setInputs(table_type = "column", source = "demo", demo = "groups", layout = "wide",
     wide_columns = c("Drug B", "Control", "Drug A"), wide_id = "Subject", family = "many",

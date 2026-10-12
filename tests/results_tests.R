@@ -1,3 +1,6 @@
+# Result-sheet regressions sourced by run_tests.R using its check/near helpers.
+# Distinguish entered-data counts from fitted-data counts, verify arranged comparison
+# and normality sheets, and retain raw precision and source IDs in cleaned exports.
 local({
   set.seed(72)
   subjects <- rnorm(12, sd = 2)

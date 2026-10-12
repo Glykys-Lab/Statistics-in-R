@@ -1,3 +1,7 @@
+# Graph construction for analyzed results: data plots, QQ/residual diagnostics,
+# comparisons, ranks, matched differences and saved-graph layouts.
+# make_graph() is the shared dispatcher for display and export. Nested analyses
+# supply their own model-aware plots; factor levels preserve experimental order.
 make_plot <- function(result, style = "points", error = "ci", title = "", x_label = "", y_label = "",
                       point_size = 2.6, symbol = 16, palette_name = "color", connect = TRUE,
                       varied_symbols = FALSE, legend = "bottom", x_angle = 0, show_stars = FALSE) {
@@ -78,6 +82,7 @@ make_plot <- function(result, style = "points", error = "ci", title = "", x_labe
 }
 
 diagnostic_plot <- function(result) {
+  if (isTRUE(result$nested)) return(result$graphs$residual)
   d <- residual_frame(result)
   if (is.null(d)) return(NULL)
   ggplot2::ggplot(d, ggplot2::aes(fitted, residual)) + ggplot2::geom_hline(yintercept = 0, color = "#A0ADAF", linetype = 2) +
@@ -85,6 +90,7 @@ diagnostic_plot <- function(result) {
 }
 
 residual_graph <- function(result, kind) {
+  # Use residuals from the fitted analysis, not differences recomputed from a plot.
   d <- residual_frame(result)
   assert(!is.null(d), "Residual graphs are unavailable for this analysis.")
   if (kind == "residual") return(diagnostic_plot(result))
@@ -138,6 +144,7 @@ difference_graph <- function(result) {
 }
 
 normality_plot <- function(result) {
+  if (isTRUE(result$nested)) return(result$graphs$assumption_qq)
   d <- result$data; m <- result$method
   if (m %in% c("chisq", "fisher", "survival")) return(NULL)
   if (m %in% c("paired_t", "paired_wilcox")) {
@@ -162,6 +169,8 @@ normality_plot <- function(result) {
 }
 
 distribution_qq_plot <- function(result, lognormal = FALSE, title = "", palette_name = "prism", legend = "right", point_size = 2.6, symbol = 16, varied_symbols = TRUE, x_angle = 0, x_label = "", y_label = "", ...) {
+  # Column-distribution QQ plots use observed measurements. Lognormal plots
+  # require positive values and are distinct from model-residual diagnostics.
   assert(!result$method %in% c("survival", "chisq", "fisher"), "Column distribution QQ plots require uncensored numeric responses, rather than event-time or count-table analyses.")
   d <- result$column_data
   if (is.null(d)) {
@@ -215,11 +224,18 @@ comparison_plot <- function(result, title = "", x_label = "", y_label = "", poin
 }
 
 graph_kinds <- c("Data graph" = "raw", "Normal QQ (columns)" = "normal_qq", "Lognormal QQ (columns)" = "lognormal_qq",
+  "Publication SuperPlot (nested models)" = "publication", "Residual QQ by condition (nested models)" = "condition_residual_qq",
   "Multiple-comparison intervals" = "comparison", "Residual diagnostic" = "residual", "Assumption QQ (differences / residuals)" = "assumption_qq",
   "Homoscedasticity" = "homoscedasticity", "Residual QQ" = "residual_qq", "Residual heatmap" = "residual_heatmap", "Ranks" = "ranks", "Matched differences" = "differences")
 
 make_graph <- function(result, kind = "raw", options = list()) {
   assert(kind %in% graph_kinds, "Unknown graph type.")
+  if (isTRUE(result$nested) && !kind %in% c("normal_qq", "lognormal_qq")) {
+    plot <- result$graphs[[kind]]
+    assert(!is.null(plot), "Enable this nested figure in Analysis options before running the analysis.")
+    return(plot)
+  }
+  assert(!kind %in% c("publication", "condition_residual_qq"), "This graph requires a nested-model analysis.")
   if (kind == "raw") return(do.call(make_plot, c(list(result = result), options)))
   if (kind == "comparison") return(do.call(comparison_plot, c(list(result = result), options)))
   if (kind %in% c("normal_qq", "lognormal_qq")) return(do.call(distribution_qq_plot, c(list(result = result, lognormal = kind == "lognormal_qq"), options)))
@@ -230,6 +246,8 @@ make_graph <- function(result, kind = "raw", options = list()) {
 }
 
 draw_graph_layout <- function(plots, columns = 2L, title = "") {
+  # Draw ggplots and publication grid grobs through their respective APIs so
+  # fixed physical dimensions in nested publication panels remain meaningful.
   assert(length(plots) > 0, "Select at least one saved graph for this layout.")
   columns <- max(1L, min(6L, as.integer(columns))); rows <- ceiling(length(plots)/columns)
   grid::grid.newpage()
@@ -238,12 +256,18 @@ draw_graph_layout <- function(plots, columns = 2L, title = "") {
   on.exit(grid::popViewport())
   if (nzchar(title)) grid::grid.text(title, vp = grid::viewport(layout.pos.row = 1, layout.pos.col = seq_len(columns)), gp = grid::gpar(fontface = "bold", fontsize = 16))
   offset <- as.integer(nzchar(title))
-  for (i in seq_along(plots)) print(plots[[i]], newpage = FALSE, vp = grid::viewport(layout.pos.row = ceiling(i/columns) + offset, layout.pos.col = (i - 1) %% columns + 1))
+  for (i in seq_along(plots)) {
+    vp <- grid::viewport(layout.pos.row = ceiling(i/columns) + offset, layout.pos.col = (i - 1) %% columns + 1)
+    if (inherits(plots[[i]], "grob")) {
+      grid::pushViewport(vp); grid::grid.draw(plots[[i]]); grid::popViewport()
+    } else print(plots[[i]], newpage = FALSE, vp = vp)
+  }
   invisible(NULL)
 }
 
 overlay_graphs <- function(entries, title = "") {
   assert(length(entries) >= 2, "Select at least two data graphs for an overlay.")
+  assert(!any(vapply(entries, function(e) isTRUE(e$result$nested), logical(1))), "Use separate panels for nested SuperPlots so model means and mouse / slice identities are preserved.")
   assert(all(vapply(entries, function(e) e$kind == "raw", logical(1))), "Overlays combine data graphs; use a panel layout for QQ, residual, or comparison graphs.")
   xy <- vapply(entries, function(e) e$result$method %in% c("linear", "pearson", "spearman"), logical(1))
   column <- vapply(entries, function(e) all(c("group", "y") %in% names(e$result$data)) && !e$result$method %in% c("survival", "chisq", "fisher", "two_way"), logical(1))

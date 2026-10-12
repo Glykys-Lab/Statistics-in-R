@@ -1,5 +1,10 @@
 # Shared calculations for the one-way analysis options. Embedded in R exports.
+# Supply comparison families/corrections, mixed-model covariance policies,
+# trend/rank follow-ups, diagnostics and optional reporting tables for analysis.R.
+# These functions take data/configuration explicitly and do not depend on Shiny.
 comparison_pairs <- function(groups, cfg) {
+  # Define the requested hypothesis family before adjusting p-values; excluded
+  # pairs must not accidentally increase or decrease the correction family.
   if (cfg$comparisons %in% c("none", "trend")) return(list())
   if (cfg$comparisons == "control") {
     assert(length(cfg$control) == 1 && cfg$control %in% groups, "Select a valid control group.")
@@ -51,6 +56,9 @@ adjust_family <- function(p, adjustment, n = length(p)) {
 }
 
 fit_mixed_options <- function(d, cfg, method = "REML", formula = y ~ group) {
+  # A signed compound-symmetry covariance and a nonnegative random intercept are
+  # different policies. Keep their fitted variance/df metadata together so tests
+  # and reporting use the same policy, including any simpler-model refit.
   policy <- cfg$random_effect
   if (is.null(policy)) policy <- "keep"
   glm_start <- !identical(cfg$glm_initial, FALSE)
@@ -190,6 +198,8 @@ residual_frame <- function(result) {
 }
 
 residual_normality_tests <- function(x) {
+  # Diagnostics are exploratory; they report distribution checks without choosing
+  # or changing the user's analysis method.
   assert(requireNamespace("nortest", quietly = TRUE), "Install nortest with source('setup.R') for residual normality tests.")
   checks <- list(
     `D'Agostino-Pearson` = function() { p <- dagostino_pearson(x); assert(is.finite(p["p_value"]), "Requires at least 8 varying residuals"); c(p["K2"], p["p_value"]) },
@@ -259,6 +269,8 @@ extra_model_tables <- function(d, fit, cfg, method) {
 }
 
 visible_result_tables <- function(result, options = result$config) {
+  # Reporting switches hide tables or columns without removing calculations that
+  # other outputs, such as comparison graphs, may still need.
   tables <- result$tables
   if (identical(options$report_descriptive, FALSE)) tables[c("summary", "original_summary", "geometric_summary", "descriptive_statistics")] <- NULL
   if (identical(options$report_adjusted_p, FALSE) && !is.null(tables$posthoc)) {

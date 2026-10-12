@@ -1,3 +1,7 @@
+# Exercise app.R's Shiny server without launching a browser, using testServer.
+# Verify editing, stale-result detection, duplicate-run prevention, archive
+# navigation/highlighting, derived tables, graphs and project save/open behavior.
+# This suite also runs the focused upload, option-server and refresh checks.
 if (dir.exists(".R-library")) .libPaths(c(normalizePath(".R-library"), .libPaths()))
 app_env <- new.env(parent = globalenv())
 sys.source("app.R", envir = app_env)

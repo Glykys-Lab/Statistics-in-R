@@ -1,3 +1,7 @@
+# Main regression entry point; run from the project root with Rscript or source().
+# Compare analyses against independent R/numerical references, validate rejected
+# inputs, render graphs and execute exported scripts before sourcing focused suites.
+# Test outputs live in artifacts/; check/near/fails are shared with included suites.
 if (dir.exists(".R-library")) .libPaths(c(normalizePath(".R-library"), .libPaths()))
 source("R/analysis.R"); source("R/data.R"); source("R/plots.R")
 invisible(parse("app.R"))
@@ -150,8 +154,8 @@ for (res in list(rm_result, mixed_result, lr)) {
 }
 check(TRUE, "Repeated/mixed residual and normal QQ figures render")
 
-# Render every supported method, including group-style and paired variants.
-for (method in unname(analysis_methods)) {
+# Nested models use hierarchical fixtures in nested_tests.R.
+for (method in setdiff(unname(analysis_methods), nested_methods)) {
   name <- if (method %in% c("welch", "student", "paired_t", "mann_whitney", "paired_wilcox")) "paired" else if (method %in% c("pearson", "spearman", "linear")) "xy" else if (method %in% c("chisq", "fisher")) "contingency" else if (method == "two_way") "factorial" else if (method %in% c("dose", "survival")) method else "groups"
   config <- list(method = method, y = if (method == "survival") "time" else "response", group = "group", x = "concentration", id = "subject", event = "event", count = "count", factor2 = if (method == "two_way") "sex" else "outcome")
   result <- run_analysis(demo_data(name), config)
@@ -181,3 +185,4 @@ source("tests/options_tests.R", encoding = "UTF-8")
 source("tests/results_tests.R", encoding = "UTF-8")
 cat("\n", checks, "checks passed.\n")
 source("tests/server_tests.R")
+source("tests/nested_tests.R", encoding = "UTF-8")

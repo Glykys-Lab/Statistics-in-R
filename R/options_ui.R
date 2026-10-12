@@ -1,3 +1,6 @@
+# Build the ordinary one-way/repeated-measures settings tabs and correction menus.
+# Values are translated into configuration by options_server.inc; keep input IDs
+# stable because saved browser defaults refer to them. Nested models use nested_ui.R.
 comparison_correction_choices <- function(method = NULL, comparisons = "all", approach = "fwer") {
   if (identical(approach, "fdr")) return(c("Two-stage Benjamini-Krieger-Yekutieli" = "BKY", "Benjamini-Hochberg" = "BH", "Benjamini-Yekutieli" = "BY"))
   if (identical(approach, "none")) return(c("No correction" = "none"))
