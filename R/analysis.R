@@ -30,6 +30,8 @@ analysis_methods <- c(
   "Kaplan-Meier + log-rank" = "survival"
 )
 
+# Return the explanation of the selected method, including its assumptions
+# and how its results should be interpreted.
 method_note <- function(method) switch(method,
   nested_repeated = "Repeated cells nested within slices and mice. Optional slice x condition effects and unequal cell noise; Satterthwaite inference from the supplied nested-model script.",
   nested_between = "Different groups of cells nested within slices and mice. Separate mouse and slice random effects; optional per-condition slice and residual SDs, with Satterthwaite inference.",
@@ -60,7 +62,10 @@ method_note <- function(method) switch(method,
   fisher = "Use one row per category combination and integer counts. Exact Fisher test; an odds ratio and confidence interval are returned only for 2-by-2 tables.",
   survival = "One independent subject per row. Time must be nonnegative; event must be numeric 1 = event, 0 = right-censored. Includes Kaplan-Meier estimates and an unadjusted log-rank comparison. No covariate adjustment.")
 
+# Stop the analysis with a readable error message when a required check fails.
 assert <- function(ok, message) if (!isTRUE(ok)) stop(message, call. = FALSE)
+# Check that the selected measurement column exists, is numeric and has no
+# infinite values, then return it without converting text into numbers.
 numeric_column <- function(data, name) {
   # Reject text and non-finite measurements rather than silently coercing them.
   assert(length(name) == 1L && name %in% names(data), "Select a valid numeric column.")
@@ -68,6 +73,8 @@ numeric_column <- function(data, name) {
   assert(!any(is.infinite(data[[name]])), paste0("Column '", name, "' contains infinite values."))
   data[[name]]
 }
+# Read a category or subject column, treat blank labels as missing, and keep
+# the existing category order or the order in which labels first appear.
 group_column <- function(data, name) {
   # Preserve an explicit factor order or first appearance, never alphabetical order.
   assert(length(name) == 1L && name %in% names(data), "Select a valid group/category column.")
@@ -75,7 +82,10 @@ group_column <- function(data, name) {
   order <- if (is.factor(data[[name]])) trimws(levels(data[[name]])) else unique(x)
   factor(x, levels = unique(order[!is.na(order) & nzchar(order)]))
 }
+# Build one descriptive-statistics row per group, including observed and
+# missing counts, spread, quartiles and a confidence interval for the mean.
 summary_table <- function(y, group, confidence = .95) {
+  # Summarize one group after counting and excluding its missing measurements.
   do.call(rbind, lapply(split(y, group, drop = TRUE), function(x) {
     missing <- sum(is.na(x)); x <- x[!is.na(x)]
     n <- length(x); se <- if (n > 1) sd(x)/sqrt(n) else NA_real_
@@ -83,8 +93,11 @@ summary_table <- function(y, group, confidence = .95) {
     data.frame(n = n, missing = missing, minimum = if (n) min(x) else NA_real_, maximum = if (n) max(x) else NA_real_, mean = if (n) mean(x) else NA_real_, sd = sd(x), sem = se, median = median(x),
                q1 = if (n) unname(quantile(x, .25)) else NA_real_, q3 = if (n) unname(quantile(x, .75)) else NA_real_,
                ci_low = if (n) mean(x) - margin else NA_real_, ci_high = if (n) mean(x) + margin else NA_real_)
+  # The final inline helper turns the combined row names into a group column.
   })) |> (function(x) data.frame(group = rownames(x), x, row.names = NULL))()
 }
+# Convert an R hypothesis-test result into a consistent one-row table.
+# Fields not supplied by the test are recorded as missing.
 htest_table <- function(test) {
   data.frame(method = test$method, statistic = if (length(test$statistic)) unname(test$statistic[1]) else NA_real_,
     df = if (length(test$parameter)) unname(test$parameter[1]) else NA_real_, p_value = test$p.value,
@@ -92,6 +105,8 @@ htest_table <- function(test) {
     ci_low = if (length(test$conf.int)) test$conf.int[1] else NA_real_,
     ci_high = if (length(test$conf.int)) test$conf.int[2] else NA_real_)
 }
+# Turn a pairwise-test p-value matrix into a table of group pairs and their
+# adjusted p-values, leaving out unused matrix entries.
 pairwise_table <- function(object) {
   x <- as.data.frame(as.table(object$p.value), stringsAsFactors = FALSE)
   names(x) <- c("group_1", "group_2", "adjusted_p_value")
@@ -99,6 +114,8 @@ pairwise_table <- function(object) {
 }
 
 # Design choices narrow the available analyses without a preliminary p-value gate.
+# Return the analysis choices that match the table type and study design,
+# including matching, distribution and variance assumptions.
 design_methods <- function(table_type = "column", family = "many", matched = FALSE,
                            distribution = "normal", variance = "unequal", repeated = "complete") {
   if (table_type == "xy") return(analysis_methods[analysis_methods %in% c("linear", "pearson", "spearman")])
@@ -115,6 +132,8 @@ design_methods <- function(table_type = "column", family = "many", matched = FAL
   analysis_methods[analysis_methods == method]
 }
 
+# Choose suitable samples for exploratory Shapiro-Wilk checks, such as
+# paired differences, model residuals or individual groups, and report limits.
 normality_table <- function(d, method, fit = NULL) {
   samples <- if (method %in% c("paired_t", "paired_wilcox")) {
     v <- split(d$y, d$group); setNames(list(v[[1]] - v[[2]]), "Within-pair differences")
@@ -124,11 +143,15 @@ normality_table <- function(d, method, fit = NULL) {
     # Within-subject contrasts, rather than pooled correlated residuals.
     subjects <- split(d, d$id)
     pairs <- combn(levels(d$group), 2, simplify = FALSE)
+    # For each condition pair, the inner helper finds each subject's difference
+    # when both measurements exist; the outer helper combines those differences.
     setNames(lapply(pairs, function(p) unlist(lapply(subjects, function(s) {
       a <- s$y[s$group == p[1]]; b <- s$y[s$group == p[2]]
       if (length(a) == 1 && length(b) == 1) a - b else NULL
     }))), vapply(pairs, paste, character(1), collapse = " minus "))
   } else if ("group" %in% names(d)) split(d$y, d$group) else return(NULL)
+  # Run Shapiro-Wilk for one eligible sample and explain when its size or
+  # constant values prevent the test from being calculated.
   do.call(rbind, lapply(names(samples), function(name) {
     x <- samples[[name]]; n <- length(x)
     status <- if (n < 3) "Requires at least 3 values" else if (n > 5000) "Maximum 5000 values; no subsampling" else if (length(unique(x)) < 2) "Constant values" else "Exploratory; assess QQ plots and study design"
@@ -138,6 +161,8 @@ normality_table <- function(d, method, fit = NULL) {
   }))
 }
 
+# Fit a repeated-measures ANOVA to complete matched data and return both
+# uncorrected and Geisser-Greenhouse-corrected tests, marking the chosen one.
 repeated_anova <- function(d, correction = "gg") {
   # Work on matched subject rows so the covariance used for GG correction has
   # the same condition ordering as the repeated-measures model.
@@ -158,6 +183,8 @@ repeated_anova <- function(d, correction = "gg") {
 
 # D'Agostino's skew transformation and Anscombe-Glynn kurtosis transformation.
 # References: D'Agostino et al. (1990), Anscombe & Glynn (1983).
+# Calculate the combined D'Agostino-Pearson normality statistic from skewness
+# and kurtosis, returning missing results for constant or too-small samples.
 dagostino_pearson <- function(x) {
   n <- length(x)
   if (n < 8 || length(unique(x)) < 2) return(c(K2 = NA_real_, p_value = NA_real_, skew_z = NA_real_, kurtosis_z = NA_real_))
@@ -179,9 +206,14 @@ dagostino_pearson <- function(x) {
   c(K2 = k2, p_value = pchisq(k2, 2, lower.tail = FALSE), skew_z = skew_z, kurtosis_z = kurt_z)
 }
 
+# Check each group for Gaussian and lognormal distributions using
+# Shapiro-Wilk and D'Agostino-Pearson tests, with notes on unavailable tests.
 distribution_tests <- function(y, group, alpha = .05) {
+  # Select the observed measurements for one group before testing its distributions.
   do.call(rbind, lapply(names(split(y, group, drop = TRUE)), function(name) {
     x <- y[as.character(group) == name]; x <- x[!is.na(x)]
+    # Test either the original values or their natural logarithms; lognormal
+    # checks require positive measurements. Return both tests and their status.
     do.call(rbind, lapply(c("Gaussian", "Lognormal"), function(distribution) {
       valid <- distribution == "Gaussian" || all(x > 0)
       values <- if (valid && distribution == "Lognormal") log(x) else x
@@ -199,14 +231,20 @@ distribution_tests <- function(y, group, alpha = .05) {
   }))
 }
 
+# Adjust a set of p-values using the selected correction, with a direct
+# calculation for Sidak and R's standard adjustment function for other methods.
 adjust_p <- function(p, adjustment) {
   if (adjustment == "sidak") -expm1(length(p) * log1p(-p)) else p.adjust(p, method = adjustment)
 }
 
+# Translate p-values into the familiar significance stars or ns label,
+# while preserving missing p-values.
 significance_summary <- function(p) {
   ifelse(is.na(p), NA_character_, ifelse(p <= .0001, "****", ifelse(p <= .001, "***", ifelse(p <= .01, "**", ifelse(p <= .05, "*", "ns")))))
 }
 
+# Add significance stars and a below-alpha flag using the first recognized
+# p-value column in a results table. Leave other tables unchanged.
 annotate_table <- function(table, alpha = .05) {
   columns <- intersect(c("adjusted_p_value", "p adj", "p_value", "Pr(>F)", "Pr(>|t|)"), names(table))
   if (!length(columns)) return(table)
@@ -215,12 +253,17 @@ annotate_table <- function(table, alpha = .05) {
   table
 }
 
+# Compare the requested group means using paired differences, unequal or
+# pooled variances, or mixed-model estimates. Return differences, uncertainty,
+# p-values and intervals, plus ratios when the response scale is logarithmic.
 mean_comparisons <- function(d, cfg, kind = "paired", fit = NULL) {
   groups <- levels(d$group); pairs <- comparison_pairs(groups, cfg)
   if (!length(pairs)) return(NULL)
   m <- length(pairs)
   tail <- (1 - cfg$confidence)/2
   adjusted_tail <- if (cfg$adjustment == "sidak") -expm1(log(cfg$confidence)/m)/2 else if (cfg$adjustment == "bonferroni") tail/m else tail
+  # Calculate one selected comparison, choosing its error estimate and degrees
+  # of freedom from the requested comparison type and available matched data.
   output <- lapply(pairs, function(p) {
     a <- d[d$group == p[1], , drop = FALSE]; b <- d[d$group == p[2], , drop = FALSE]
     status <- "OK"; estimate <- se <- df <- mean_1 <- mean_2 <- NA_real_; n_pairs <- NA_integer_
@@ -248,6 +291,8 @@ mean_comparisons <- function(d, cfg, kind = "paired", fit = NULL) {
       if (kind == "mixed_pairs") {
         coverage <- table(pair_d$id, pair_d$group); n_pairs <- sum(rowSums(coverage) == 2)
         if (n_pairs < 2 || nrow(pair_d) <= nlevels(pair_d$id) + 1) status <- "Unavailable: insufficient overlap for this pair"
+        # If fitting this pair's mixed model fails, return NULL so the comparison
+        # can be labelled unavailable without stopping all remaining comparisons.
         else pair_fit <- tryCatch(fit_mixed_options(pair_d, cfg), error = function(e) NULL)
         if (is.null(pair_fit)) status <- "Unavailable: pairwise model did not converge"
       }
@@ -278,6 +323,8 @@ mean_comparisons <- function(d, cfg, kind = "paired", fit = NULL) {
   result
 }
 
+# Arrange repeated measurements into a subject-by-condition matrix, keeping
+# missing measurements as NA and preserving subject and condition order.
 subject_matrix <- function(d) {
   subjects <- levels(d$id); groups <- levels(d$group)
   x <- matrix(NA_real_, length(subjects), length(groups), dimnames = list(subjects, groups))
@@ -285,6 +332,8 @@ subject_matrix <- function(d) {
   x
 }
 
+# Calculate Geisser-Greenhouse epsilon from a condition covariance matrix
+# to adjust repeated-measures degrees of freedom. Two conditions give one.
 gg_epsilon <- function(covariance) {
   k <- nrow(covariance)
   if (k == 2) return(1)
@@ -295,6 +344,9 @@ gg_epsilon <- function(covariance) {
 
 # Observed-data multivariate Gaussian EM. Missing outcomes are integrated out;
 # conditional covariance contributes to E[YY']; values are never imputed for tests.
+# Estimate the condition covariance matrix from incomplete repeated data
+# using expectation maximization. Check data overlap and convergence without
+# filling in missing measurements in the table used for statistical tests.
 em_covariance <- function(x, maxiter = 2000L, tolerance = 1e-7) {
   x <- x[rowSums(!is.na(x)) > 0, , drop = FALSE]; n <- nrow(x); k <- ncol(x)
   assert(n >= 3 && all(colSums(!is.na(x)) >= 2), "GG covariance requires at least three subjects and two observations per condition.")
@@ -324,6 +376,8 @@ em_covariance <- function(x, maxiter = 2000L, tolerance = 1e-7) {
   list(covariance = s*n/(n - 1), iterations = iteration)
 }
 
+# Choose the covariance estimate used for mixed-model GG correction:
+# use complete data directly, or estimate covariance when values are missing.
 mixed_epsilon <- function(d) {
   x <- subject_matrix(d)
   if (ncol(x) == 2) return(list(epsilon = 1, source = "Two conditions: epsilon = 1", iterations = 0))
@@ -332,6 +386,9 @@ mixed_epsilon <- function(d) {
   list(epsilon = gg_epsilon(em$covariance), source = "Observed-data Gaussian EM unstructured covariance (not Prism-validated)", iterations = em$iterations)
 }
 
+# Apply ROUT outlier detection to one column using a robust constant fit
+# and the chosen false-discovery-rate target Q. Return flags and diagnostics
+# without deleting observations from the source data.
 rout_column <- function(x, q = .01, tolerance = 1e-9, maxiter = 1000L) {
   # Identify unusually large deviations using a robust center/scale and FDR rule;
   # the caller decides whether to flag observations or create cleaned data.
@@ -367,6 +424,9 @@ rout_column <- function(x, q = .01, tolerance = 1e-9, maxiter = 1000L) {
   list(location = location, scale = scale, residual = residual, p_value = p, threshold = threshold, outlier = flag, status = status)
 }
 
+# Run the requested analysis from the supplied data and settings. Validate
+# the choices, route automatic, logarithmic and nested methods appropriately,
+# and return the calculated tables, model, data, notes and warnings.
 run_analysis <- function(data, config) {
   # Route hierarchical data before ordinary-column validation: nested models need
   # Mouse/Slice/Cell columns rather than a single group and subject mapping.
@@ -419,6 +479,8 @@ run_analysis <- function(data, config) {
   assert(cfg$scale %in% c("raw", "log"), "Unknown response scale.")
   method <- cfg$method
   notes <- method_note(method); warnings <- character(); tables <- list(); fit <- NULL
+  # Prepare the selected columns, check matching and missing data, perform
+  # the chosen calculation, and assemble result tables and optional diagnostics.
   calc <- function() {
     if (method %in% c("chisq", "fisher")) {
       assert(cfg$group != cfg$factor2, "Select two different category columns.")
@@ -513,6 +575,8 @@ run_analysis <- function(data, config) {
     }
     if (method == "outliers") {
       assert(length(cfg$rout_q) == 1 && is.finite(cfg$rout_q) && cfg$rout_q > 0 && cfg$rout_q < 1, "ROUT Q must lie between 0 and 1.")
+      # Apply ROUT separately to one group and attach its original row numbers
+      # so flagged measurements can be traced back to the worksheet.
       detections <- lapply(split(d, d$group, drop = TRUE), function(z) {
         r <- rout_column(z$y, cfg$rout_q)
         data.frame(group = as.character(z$group), source_row = z$source_row, value = z$y,
@@ -522,6 +586,7 @@ run_analysis <- function(data, config) {
       detections <- do.call(rbind, detections); rownames(detections) <- NULL
       tables$outlier_details <<- detections
       tables$outliers <<- detections[detections$outlier, , drop = FALSE]
+      # Summarize one group's ROUT flags, robust center, residual scale and status.
       tables$outlier_summary <<- do.call(rbind, lapply(split(detections, detections$group), function(z) data.frame(group = z$group[1], method = "ROUT constant fit", Q = cfg$rout_q,
         n = nrow(z), outliers = sum(z$outlier), robust_mean = z$robust_mean[1], RSDR = z$RSDR[1], status = z$status[1])))
       cleaned <- data; cleaned[detections$source_row[detections$outlier], cfg$y] <- NA_real_
@@ -644,12 +709,16 @@ run_analysis <- function(data, config) {
       assert(nrow(d) >= 6 && length(unique(d$x)) >= 5 && diff(range(d$y)) > 0, "Use at least six observations, five distinct positive concentrations, and a varying response.")
       assert(cfg$direction %in% c("increasing", "decreasing"), "Select an increasing or decreasing curve.")
       sign_hill <- if (cfg$direction == "decreasing") 1 else -1
+      # Try fitting the dose-response curve from each candidate starting midpoint.
+      # The error helper returns NULL for failed fits so other starts can be tried.
       candidates <- lapply(c(.25, .5, .75), function(q) tryCatch(nls(
         y ~ bottom + exp(logSpan) / (1 + exp(hill * (log(x) - logEC50))), data = d,
         start = list(bottom = min(d$y), logSpan = log(diff(range(d$y))), logEC50 = as.numeric(quantile(log(d$x), q)), hill = sign_hill),
         algorithm = "port", lower = c(-Inf, -30, log(min(d$x)) - 10, if (sign_hill > 0) .01 else -10),
         upper = c(Inf, 30, log(max(d$x)) + 10, if (sign_hill > 0) 10 else -.01),
+        # A failed curve fit returns NULL and is excluded from the candidate fits.
         control = nls.control(maxiter = 500)), error = function(e) NULL))
+      # Keep only curve fits that exist and report successful convergence.
       candidates <- Filter(function(f) !is.null(f) && isTRUE(f$convInfo$isConv), candidates)
       assert(length(candidates) > 0, "The 4PL model did not converge. Check curve direction and whether doses span both plateaus.")
       fit <<- candidates[[which.min(vapply(candidates, deviance, numeric(1)))]]
@@ -690,6 +759,8 @@ run_analysis <- function(data, config) {
     }
     if (!is.null(column_values)) {
       tables$distribution_tests <<- distribution_tests(column_values$y, column_values$group, cfg$alpha)
+      # Count observed values, zeros and negatives in each group to help explain
+      # whether Gaussian and lognormal distribution checks are available.
       tables$distribution_counts <<- do.call(rbind, lapply(split(column_values$y, column_values$group), function(x) data.frame(n = length(x), zeros = sum(x == 0), negatives = sum(x < 0))))
       tables$distribution_counts <<- data.frame(group = rownames(tables$distribution_counts), tables$distribution_counts, row.names = NULL)
     }
@@ -714,6 +785,8 @@ run_analysis <- function(data, config) {
     }
     list(method = method, config = cfg, tables = tables, fit = fit, data = d, raw_data = raw_d, column_data = column_values, notes = notes)
   }
+  # Collect calculation warnings for the result and report, then muffle each
+  # warning so it is recorded without also being printed during the calculation.
   result <- withCallingHandlers(calc(), warning = function(w) {
     warnings <<- c(warnings, conditionMessage(w)); invokeRestart("muffleWarning")
   })
@@ -721,13 +794,17 @@ run_analysis <- function(data, config) {
   result
 }
 
+# Create a plain-text analysis report from the method, notes, warnings and
+# result sheets, using the selected number and p-value display settings.
 analysis_report <- function(result, options = list(), worksheet = NULL) {
   settings <- modifyList(list(output_digits = 4L, p_style = "prism", p_digits = 6L), modifyList(result$config, options))
   sheets <- result_sheets(result, worksheet = worksheet)
   c("LabStats analysis report", format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z"),
     names(analysis_methods)[match(result$method, analysis_methods)], "", result$notes,
     if (length(result$warnings)) c("", "WARNINGS", result$warnings),
+    # Convert each result sheet into a titled section of the plain-text report.
     unlist(lapply(sheets, function(sheet) c("", toupper(sheet$title), capture.output(print(sheet_frame(sheet, settings), row.names = FALSE)), sheet$note))),
+    # Append any additional result tables using the same display settings.
     unlist(lapply(names(attr(sheets, "additional")), function(name) {
       table <- attr(sheets, "additional")[[name]]
       c("", toupper(name), capture.output(print(format_result_table(table, settings$output_digits, settings$p_style, settings$p_digits), row.names = FALSE)))
