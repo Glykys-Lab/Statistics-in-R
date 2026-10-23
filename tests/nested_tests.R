@@ -101,6 +101,6 @@ script <- reproduction_script(d, cfg, graph_kind = "publication", worksheet = p$
 writeLines(script, "artifacts/nested-tests/reproduce.R", useBytes = TRUE)
 path <- normalizePath("artifacts/nested-tests/reproduce.R"); old <- getwd(); setwd("artifacts/nested-tests")
 env <- new.env(parent = globalenv()); source(path, local = env, encoding = "UTF-8"); setwd(old)
-expect_nested(max(abs(env$result$tables$multiple_comparisons$p_adj - r$tables$multiple_comparisons$p_adj)) < 1e-10 && file.exists("artifacts/nested-tests/nested_analysis.zip"),
+expect_nested(max(abs(env$result$tables$multiple_comparisons$p_adj - r$tables$multiple_comparisons$p_adj)) < 1e-10 && file.exists("artifacts/nested-tests/linear_mixed_analysis.zip"),
   "Exported nested script runs independently of the project directory and reproduces results")
 cat(nested_checks, "nested-model checks passed.\n")

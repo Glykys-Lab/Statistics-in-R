@@ -183,6 +183,38 @@ cleaned_worksheet <- function(result, worksheet = NULL) {
   for (j in seq_along(columns)) d[[columns[j]]] <- result$tables$cleaned_data[[result$config$y]][((j-1)*nrow(d)+1):(j*nrow(d))]
   d
 }
+# Present t-test hypotheses, directional intervals and correction decisions.
+t_test_sheet <- function(result) {
+  cfg <- result$config; multiple <- result$method %in% multiple_t_methods
+  x <- if (multiple) result$tables$posthoc else result$tables$test
+  lognormal <- identical(cfg$scale, "log"); one <- result$method %in% one_sample_methods
+  estimate_label <- if (one) if (lognormal) "Geometric mean" else "Mean" else if (lognormal) "Geometric-mean ratio" else "Mean difference"
+  effect <- if (lognormal) x$original_scale_estimate else x$estimate
+  low <- if (lognormal) x$original_ci_low else x$ci_low
+  high <- if (lognormal) x$original_ci_high else x$ci_high
+  rows <- list(sheet_row("Comparison", x$contrast), sheet_row("Alternative hypothesis", x$alternative),
+    sheet_row(if (one) "Hypothesized mean" else if (lognormal) "Hypothesized ratio" else "Hypothesized difference", x$null_value, types = "number"),
+    sheet_row(estimate_label, effect, types = "number"),
+    sheet_row("Lower confidence limit", low, types = "number"), sheet_row("Upper confidence limit", high, types = "number"),
+    sheet_row("Confidence interval", x$interval), sheet_row("Raw P value", x$p_value, types = "p"))
+  if (multiple) {
+    if (!identical(cfg$report_adjusted_p, FALSE)) rows <- c(rows, list(sheet_row("Adjusted P value", x$adjusted_p_value, types = "p")))
+    rows <- c(rows, list(sheet_row("Correction", rep(cfg$adjustment, nrow(x))), sheet_row("Planned tests in family", x$family_size, types = "count")))
+  }
+  fdr <- multiple && cfg$adjustment %in% c("BH", "BY", "BKY")
+  rows <- c(rows, list(sheet_row(if (fdr) "FDR discovery" else "Below alpha", if (fdr) x$discovery else x$significant, types = "decision"),
+    sheet_row(if (fdr) "Target FDR Q" else "Alpha", rep(if (fdr) cfg$fdr_q else cfg$alpha, nrow(x)), types = "number"),
+    sheet_row("t statistic", x$statistic, types = "number"), sheet_row("Degrees of freedom", x$df, types = "number"),
+    sheet_row("Measurements in sample 1", x$n1, types = "count")))
+  if (!one) rows <- c(rows, list(sheet_row("Measurements in sample 2", x$n2, types = "count")))
+  if (any(!is.na(x$n_pairs))) rows <- c(rows, list(sheet_row("Complete matched pairs", x$n_pairs, types = "count")))
+  rows <- c(rows, list(sheet_row("Status", x$status)))
+  result_sheet(if (multiple) "Multiple t-tests" else "T-test results", x$test, rows,
+    paste(if (lognormal) "Greater and less compare the printed geometric-mean ratio or geometric mean with its hypothesized value." else "Greater and less refer to the printed first-minus-second contrast or the sample mean versus its hypothesis.",
+      "One-sided intervals have one unbounded limit; lognormal limits are shown on the original scale.",
+      if (multiple) "Unavailable tests remain in the correction family. FDR decisions use Q; confidence intervals are simultaneous only for Bonferroni or Sidak."))
+}
+
 result_sheets <- function(result, table_name = "", worksheet = NULL) {
   # Arrange each analysis into useful result tabs. Worksheet metadata supplies
   # original column names and counts when the fitted data omitted measurements.
@@ -194,7 +226,19 @@ result_sheets <- function(result, table_name = "", worksheet = NULL) {
     attr(sheets, "additional") <- list()
     return(sheets)
   }
-  if (result$method == "outliers") {
+  if (result$method %in% t_test_methods) {
+    sheets$tabular_results <- t_test_sheet(result)
+    consumed <- c("test", "posthoc")
+    if (!is.null(t$descriptive_statistics)) {
+      sheets$descriptive_statistics <- descriptive_sheet(result)
+      consumed <- c(consumed, "descriptive_statistics", "summary", "original_summary")
+    }
+    if (!is.null(t$distribution_tests)) {
+      sheets$normality_distribution <- normality_sheet(result)
+      sheets$normality_distribution$title <- "Normality & lognormality"
+      consumed <- c(consumed, "distribution_tests", "distribution_counts")
+    }
+  } else if (result$method == "outliers") {
     x <- t$outlier_summary
     sheets$summary <- result_sheet("Summary", as.character(x$group), list(sheet_row("Method", kind = "section"), sheet_row(paste0("ROUT (Q = ", result$config$rout_q*100, "%)")), sheet_row(kind = "blank"), sheet_row("Number of points", kind = "section"),
       sheet_row("Y values analyzed", x$n, types = "count"), sheet_row("Outliers", x$outliers, types = "count"), sheet_row("Status", x$status)))

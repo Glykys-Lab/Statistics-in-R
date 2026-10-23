@@ -54,8 +54,19 @@ save_current_table <- function(copy = FALSE, name = input$table_name, d = raw_da
 observeEvent(input$save_table, guard({ id <- save_current_table(); load_table(id); showNotification("Table saved in this project.") }))
 observeEvent(input$copy_table, guard({ id <- save_current_table(TRUE, paste(input$table_name, "copy")); load_table(id) }))
 observeEvent(input$source, { if (!input$source %in% c("workspace", "upload")) { active_table_id(NULL); working_table_id(NULL); selected_sheet(NULL) } }, ignoreInit = TRUE)
+# Open project information without adding another workspace navigation tab.
+show_project_details <- function() {
+  p <- project()
+  showModal(modalDialog(title = "Project information",
+    textInput("project_name", "Project title", p$name),
+    textAreaInput("project_info", "Notes / experiment information", p$info, rows = 8),
+    footer = tagList(modalButton("Close"), actionButton("save_info", "Save information", class = "btn-primary")),
+    easyClose = TRUE))
+}
+observeEvent(input$project_details, show_project_details())
 observeEvent(input$save_info, {
   p <- project(); p$name <- input$project_name; p$info <- input$project_info; project(p)
+  removeModal()
   showNotification("Project information saved.")
 })
 
@@ -75,7 +86,7 @@ output$project_tree <- renderUI({
     tags$details(open = "open", class = "project-section", tags$summary(paste(switch(section, tables = "Data Tables", analyses = "Results", graphs = "Graphs", layouts = "Layouts"), length(entries))),
       lapply(entries, function(e) project_button(section, e$id, e$name)),
       if (!length(entries)) div(class = "hint", if (nzchar(search)) "No matches" else "No saved sheets yet"))
-  }), project_button("info", "info", "Project information"))
+  }))
 })
 output$family_tree <- renderUI({
   p <- project(); id <- active_table_id(); t <- if (is.null(id)) NULL else p$tables[[id]]
@@ -125,10 +136,7 @@ observeEvent(input$project_open, guard({
       updateNumericInput(session, "layout_columns", value = l$columns)
       updateTabsetPanel(session, "tabs", selected = "layouts")
       select_sheet("layouts", event$key)
-    }, info = {
-      updateTabsetPanel(session, "tabs", selected = "info")
-      select_sheet("info", "info")
-    })
+    }, info = show_project_details())
 }))
 observeEvent(input$rename_analysis, guard({
   req(saved()); assert(nzchar(trimws(input$analysis_name)), "Enter an analysis name.")
@@ -195,6 +203,9 @@ output$download_layout_png <- downloadHandler(filename = "layout.png", content =
 })
 output$download_layout_pdf <- downloadHandler(filename = "layout.pdf", content = function(file) {
   grDevices::cairo_pdf(file, width = 10, height = 7); on.exit(grDevices::dev.off()); draw_layout()
+})
+output$download_layout_svg <- downloadHandler(filename = "layout.svg", content = function(file) {
+  svglite::svglite(file, width = 10, height = 7); on.exit(grDevices::dev.off()); draw_layout()
 })
 output$download_project <- downloadHandler(filename = "labstats_project.json", content = function(file) writeLines(project_json(project()), file, useBytes = TRUE))
 observeEvent(input$project_file, guard({

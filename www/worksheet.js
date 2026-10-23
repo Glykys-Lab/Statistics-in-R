@@ -14,6 +14,9 @@ function saveWorksheetCell(event) {
 document.addEventListener('change', saveWorksheetCell, true);
 document.addEventListener('blur', saveWorksheetCell, true);
 document.addEventListener('click', function(event) {
+  // Close the project menu after choosing an action or download.
+  const projectMenu = event.target.closest('.project-menu');
+  if (projectMenu && event.target.closest('button, a')) projectMenu.open = false;
   // Delegate clicks because Shiny replaces navigator buttons as the project changes.
   const link = event.target.closest('.project-link');
   if (link && window.Shiny) Shiny.setInputValue('project_open', {

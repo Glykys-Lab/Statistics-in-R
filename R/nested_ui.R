@@ -9,8 +9,8 @@ nested_control <- function(name, label, choices = NULL, min = NA, max = NA, step
   textInput(id, label, if (is.null(value)) "" else value)
 }
 nested_options_ui <- function() tagList(
-  h3("Nested mouse / slice / cell models"),
-  p("Use these models when cells share slices and mice. Repeated data have one row per cell and a column per condition; between-group data have one measurement and condition per row. Map the ID columns in the navigator."),
+  h3("Linear mixed analysis: mouse / slice / cell"),
+  p("Use these models when cells share slices and mice. Repeated data have one row per cell and a column per condition; between-group data have one measurement and condition per row. Map the ID columns in Analysis."),
   tabsetPanel(id = "nested_tabs",
     tabPanel("Design & fitting", value = "fit",
       radioButtons("nested_design", "Experimental design", c("Same cells followed across conditions (wide table)" = "repeated", "Different groups, one measurement per cell (long table)" = "between")),
@@ -34,7 +34,7 @@ nested_options_ui <- function() tagList(
     tabPanel("Outliers", value = "outliers",
       nested_control("outlier_action", "ROUT cell outliers", c("Flag and keep measurements" = "flag", "Remove flagged cell measurements from this analysis" = "remove", "Do not test outliers" = "none")),
       nested_control("outlier_unit", "Units to check", c("Cells" = "cell", "Slices (flag only)" = "slice", "Cells and slices" = "both")),
-      nested_control("outlier_level", "Values to test", c("Nested-model residuals: remove mouse / slice offsets" = "residuals", "Raw values within each condition" = "raw")),
+      nested_control("outlier_level", "Values to test", c("Linear mixed model residuals: remove mouse / slice offsets" = "residuals", "Raw values within each condition" = "raw")),
       nested_control("outlier_Q", "ROUT false discovery rate Q (0.01 = 1%)", min = .001, max = .1, step = .001),
       p(class = "hint", "Removal affects this analysis snapshot; the source table is preserved. Slice outliers are always flagged and kept. Tables and reports record the action and each flagged measurement.")),
     tabPanel("Figures", value = "figures",

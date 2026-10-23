@@ -63,16 +63,17 @@ nested_input <- function(data, cfg) {
     conditions <- order
     if (cfg$method == "nested_repeated") out <- out[c("Mouse", "Slice", "Cell", order)]
   }
-  assert(any(!is.na(all_values)), "Enter at least one measurement before running a nested model.")
+  assert(any(!is.na(all_values)), "Enter at least one measurement before running a linear mixed analysis.")
   out
 }
 
-run_nested_analysis <- function(data, config) {
+run_nested_analysis <- function(data, config, progress = function(value = NULL, detail = NULL) NULL) {
   # Reference scripts expect named SETTINGS variables and CSV files. Override
   # both before their execution; capture warnings and outputs for this snapshot.
+  progress(.05, "Checking data and model settings")
   missing <- nested_packages[!vapply(nested_packages, requireNamespace, logical(1), quietly = TRUE)]
-  assert(!length(missing), paste("Run source('setup.R') to install nested-model packages:", paste(missing, collapse = ", ")))
-  assert(is.null(config$nested) || (is.list(config$nested) && all(names(config$nested) %in% names(nested_defaults()))), "Unknown nested-model settings.")
+  assert(!length(missing), paste("Run source('setup.R') to install linear mixed analysis packages:", paste(missing, collapse = ", ")))
+  assert(is.null(config$nested) || (is.list(config$nested) && all(names(config$nested) %in% names(nested_defaults()))), "Unknown linear mixed analysis settings.")
   settings <- modifyList(nested_defaults(), if (is.null(config$nested)) list() else config$nested, keep.null = TRUE)
   for (n in c("custom_pairs", "pub_key_labels", "pub_condition_labels", "pub_mouse_colours")) if (n %in% names(config$nested)) settings[n] <- list(config$nested[[n]])
   # JSON round-trips may represent vectors as lists.
@@ -106,10 +107,11 @@ run_nested_analysis <- function(data, config) {
   }
   control <- if (length(config$control)) as.character(config$control) else conditions[1]
   assert(length(control) == 1L && control %in% conditions, "Choose a control condition present in the selected measurements.")
-  if (isTRUE(settings$log_transform)) assert(all(values[!is.na(values)] > 0), "Log10 nested analysis requires every observed value to be positive. Zeros and negatives cannot be logged.")
+  if (isTRUE(settings$log_transform)) assert(all(values[!is.na(values)] > 0), "Log10 linear mixed analysis requires every observed value to be positive. Zeros and negatives cannot be logged.")
   assert(settings$variance_alpha > 0 && settings$variance_alpha < 1 && settings$outlier_Q > 0 && settings$outlier_Q < 1, "Variance alpha and ROUT Q must lie between 0 and 1.")
   assert(settings$p_threshold > 0 && settings$p_threshold < 1 && settings$pub_width_mm > 0 && settings$pub_main_height_mm > 0 && settings$pub_comp_height_mm >= 0, "Choose valid significance and positive figure dimensions.")
   assert(settings$num_decimals %in% 0:10 && settings$p_decimals %in% 1:10, "Choose 0-10 numeric and 1-10 p-value decimal places.")
+  progress(.1, "Preparing measurements")
   work <- tempfile("labstats-nested-"); dir.create(work)
   on.exit(unlink(work, recursive = TRUE), add = TRUE)
   # Font/layout measurement must not create Rplots.pdf in the project folder.
@@ -126,6 +128,7 @@ run_nested_analysis <- function(data, config) {
   # Keep reference variables out of the app environment and restore emmeans
   # options after the run so subsequent analyses retain their own inference settings.
   env$labstats_normality <- nested_normality
+  env$labstats_progress <- progress
   env$labstats_control <- control
   if (identical(settings$change_measure, "auto") && length(config$source_name) && grepl("change", config$source_name, ignore.case = TRUE)) env$labstats_overrides$change_measure <- TRUE
   emm_options <- emmeans::emm_options()
@@ -137,6 +140,7 @@ run_nested_analysis <- function(data, config) {
       checks <- if (exists("fit_warnings", env, inherits = FALSE)) env$fit_warnings else character()
       stop(paste(c(conditionMessage(e), tail(unique(c(checks, warnings)), 4L)), collapse = "\n"), call. = FALSE)
     })
+  progress(.9, "Collecting result tables and figures")
   get_optional <- function(n) if (exists(n, env, inherits = FALSE)) get(n, env, inherits = FALSE) else NULL
   # Preserve numeric tables alongside display-formatted copies and retain artifact
   # bytes before deleting the temporary directory used by the reference script.
@@ -170,7 +174,7 @@ run_nested_analysis <- function(data, config) {
   env$count_cols_all <- c(env$count_cols_all, "input_rows", "used_rows", "excluded_rows", "missing_values", "removed_outliers")
   formatted <- lapply(tables, function(t) if (is.data.frame(t) && ncol(t)) env$fmt_tbl(t) else t)
   notes <- c(env$model_desc, get_optional("df_note"), get_optional("sd_note"), get_optional("outlier_note"), get_optional("slice_outlier_note"),
-    "Nested models follow the supplied reference scripts. Control comparisons use the emmeans Dunnett approximation (dunnettx); Holm p-values use Bonferroni intervals. Candidate variance tests are conventional likelihood-ratio approximations.",
+    "Linear mixed analyses follow the supplied reference scripts. Control comparisons use the emmeans Dunnett approximation (dunnettx); Holm p-values use Bonferroni intervals. Candidate variance tests are conventional likelihood-ratio approximations.",
     "Cells share mouse and slice effects. Report mice / slices / cells separately. Missing measurements are omitted individually; no values are imputed.")
   list(method = config$method, config = config, tables = tables, formatted_tables = formatted, data = data.frame(y = long$Response, group = long$Condition),
     column_data = data.frame(y = long$Value, group = long$Condition), fit = env$model, nested = TRUE,
@@ -235,7 +239,7 @@ nested_html_report <- function(result) {
   text <- gsub("&", "&amp;", text, fixed = TRUE)
   text <- gsub("<", "&lt;", text, fixed = TRUE); text <- gsub(">", "&gt;", text, fixed = TRUE)
   body <- commonmark::markdown_html(text, extensions = TRUE)
-  paste0('<!doctype html><html><head><meta charset="utf-8"><title>Nested-model report</title><style>body{font:15px system-ui;max-width:1100px;margin:30px auto;padding:0 24px;color:#25364a;background:white}[hidden]{display:none!important}img{max-width:100%}table{border-collapse:collapse;display:block;overflow:auto}td,th{border:1px solid #ddd;padding:6px}button,select{padding:8px;margin:4px}.report-section{margin:24px 0}</style></head><body>',
+  paste0('<!doctype html><html><head><meta charset="utf-8"><title>Linear mixed analysis report</title><style>body{font:15px system-ui;max-width:1100px;margin:30px auto;padding:0 24px;color:#25364a;background:white}[hidden]{display:none!important}img{max-width:100%}table{border-collapse:collapse;display:block;overflow:auto}td,th{border:1px solid #ddd;padding:6px}button,select{padding:8px;margin:4px}.report-section{margin:24px 0}</style></head><body>',
     '<nav><button onclick="move(-1)">Previous</button><button onclick="move(1)">Next</button><select id="sections" onchange="show(this.value)"></select><button onclick="allSections()">Show all</button></nav>',
     body, '<script>const nodes=[...document.body.children].filter(n=>n.tagName!=="NAV"&&n.tagName!=="SCRIPT");let groups=[],current=[];for(const n of nodes){if(/^H[12]$/.test(n.tagName)&&current.length){groups.push(current);current=[]}current.push(n)}if(current.length)groups.push(current);let index=0;const s=document.getElementById("sections");groups.forEach((g,i)=>s.add(new Option(g.find(n=>/^H[12]$/.test(n.tagName))?.textContent||"Introduction",i)));function show(i){index=Math.max(0,Math.min(groups.length-1,+i));groups.forEach((g,j)=>g.forEach(n=>n.hidden=j!==index));s.value=index}function move(d){show(index+d)}function allSections(){groups.forEach(g=>g.forEach(n=>n.hidden=false))}document.addEventListener("keydown",e=>{if(e.target.matches("input,textarea,select"))return;if(e.key==="ArrowRight")move(1);if(e.key==="ArrowLeft")move(-1)});show(0);</script></body></html>')
 }

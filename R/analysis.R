@@ -6,9 +6,15 @@
 if (file.exists("R/options.R")) source("R/options.R", local = TRUE)
 if (file.exists("R/results.R")) source("R/results.R", local = TRUE)
 if (file.exists("R/nested.R")) source("R/nested.R", local = TRUE)
+if (file.exists("R/t_tests.R")) source("R/t_tests.R", local = TRUE)
 analysis_methods <- c(
   "Descriptive statistics" = "summary", "Unpaired t test (Welch)" = "welch",
   "Unpaired t test (equal variance)" = "student", "Paired t test" = "paired_t",
+  "One-sample t test" = "one_sample",
+  "Lognormal unpaired t test (Welch)" = "log_welch",
+  "Lognormal unpaired t test (equal log variance)" = "log_student",
+  "Lognormal paired t test" = "log_paired_t", "Lognormal one-sample t test" = "log_one_sample",
+  "Multiple t-tests" = "multiple_t", "Multiple lognormal t-tests" = "log_multiple_t",
   "Mann-Whitney test" = "mann_whitney", "Wilcoxon matched-pairs test" = "paired_wilcox",
   "One-way ANOVA" = "anova", "Welch one-way ANOVA" = "welch_anova",
   "Kruskal-Wallis" = "kruskal",
@@ -19,8 +25,8 @@ analysis_methods <- c(
   "Automatic lognormal repeated ANOVA / mixed effects" = "log_rm_auto",
   "Lognormal repeated-measures ANOVA" = "log_rm_anova",
   "Lognormal mixed-effects model (REML)" = "log_mixed",
-  "Nested mixed model: repeated cells" = "nested_repeated",
-  "Nested mixed model: between groups" = "nested_between",
+  "Linear mixed analysis: repeated cells" = "nested_repeated",
+  "Linear mixed analysis: between groups" = "nested_between",
   "Normality and lognormality tests" = "normality",
   "Identify outliers (ROUT)" = "outliers",
   "Two-way ANOVA (balanced, independent)" = "two_way",
@@ -33,8 +39,15 @@ analysis_methods <- c(
 # Return the explanation of the selected method, including its assumptions
 # and how its results should be interpreted.
 method_note <- function(method) switch(method,
-  nested_repeated = "Repeated cells nested within slices and mice. Optional slice x condition effects and unequal cell noise; Satterthwaite inference from the supplied nested-model script.",
-  nested_between = "Different groups of cells nested within slices and mice. Separate mouse and slice random effects; optional per-condition slice and residual SDs, with Satterthwaite inference.",
+  one_sample = "Compare one sample mean with a hypothesized value. Choose a two-sided or prespecified one-sided hypothesis. At least two observed measurements are required.",
+  log_one_sample = "One-sample t test on natural-log positive measurements. The hypothesized value is an original-scale geometric mean; estimates and confidence limits are exponentiated back to that scale.",
+  log_welch = "Welch t test on natural logs of two independent positive samples. Unequal log variances are allowed; original-scale effects are geometric-mean ratios.",
+  log_student = "Equal-variance t test on natural logs of two independent positive samples. The equal-variance assumption concerns the log values; effects are geometric-mean ratios.",
+  log_paired_t = "Paired t test on natural-log positive measurements, matched by subject ID. Complete pairs are used; the effect is the geometric mean of within-pair ratios.",
+  multiple_t = "A separate Welch, equal-variance or paired t test for each selected column pair or endpoint. Apply one p-value correction across the planned family. Each test estimates its own variance and matched pairs.",
+  log_multiple_t = "Multiple t-tests on natural-log positive measurements. Report geometric-mean ratios and apply one correction across all planned comparisons or endpoints.",
+  nested_repeated = "Linear mixed analysis of repeated cells within slices and mice. Optional slice x condition effects and unequal cell noise; Satterthwaite inference from the supplied linear mixed model script.",
+  nested_between = "Linear mixed analysis of different groups of cells within slices and mice. Separate mouse and slice random effects; optional per-condition slice and residual SDs, with Satterthwaite inference.",
   rm_auto = "Use repeated-measures ANOVA when all subjects have every selected condition; otherwise use REML mixed effects with the available observations.",
   log_rm_auto = "Choose repeated ANOVA or REML mixed effects based on completeness, using natural-log responses and geometric-mean comparisons.",
   summary = "Mean, SD, SEM, median, quartiles, and a t-based confidence interval for each group mean. Each row should represent an independent experimental unit.",
@@ -122,9 +135,12 @@ design_methods <- function(table_type = "column", family = "many", matched = FAL
   if (table_type == "nested") return(analysis_methods[analysis_methods %in% nested_methods])
   if (table_type == "other") return(analysis_methods[!analysis_methods %in% nested_methods])
   if (family %in% c("normality", "outliers")) return(analysis_methods[analysis_methods == family])
+  if (family == "one") return(analysis_methods[analysis_methods == if (distribution == "lognormal") "log_one_sample" else "one_sample"])
+  if (family == "multiple_t") return(analysis_methods[analysis_methods == if (distribution == "lognormal") "log_multiple_t" else "multiple_t"])
   if (distribution == "lognormal" && matched && family == "many") return(analysis_methods[analysis_methods == switch(repeated, mixed = "log_mixed", auto = "log_rm_auto", "log_rm_anova")])
   method <- if (family == "summary") "summary" else if (family == "two") {
-    if (matched) { if (distribution == "normal") "paired_t" else "paired_wilcox" }
+    if (distribution == "lognormal") { if (matched) "log_paired_t" else if (variance == "equal") "log_student" else "log_welch" }
+    else if (matched) { if (distribution == "normal") "paired_t" else "paired_wilcox" }
     else if (distribution == "rank") "mann_whitney" else if (variance == "equal") "student" else "welch"
   } else if (matched) {
     if (distribution == "rank") "friedman" else switch(repeated, mixed = "mixed", auto = "rm_auto", "rm_anova")
@@ -427,10 +443,10 @@ rout_column <- function(x, q = .01, tolerance = 1e-9, maxiter = 1000L) {
 # Run the requested analysis from the supplied data and settings. Validate
 # the choices, route automatic, logarithmic and nested methods appropriately,
 # and return the calculated tables, model, data, notes and warnings.
-run_analysis <- function(data, config) {
+run_analysis <- function(data, config, progress = function(value = NULL, detail = NULL) NULL) {
   # Route hierarchical data before ordinary-column validation: nested models need
   # Mouse/Slice/Cell columns rather than a single group and subject mapping.
-  if (config$method %in% nested_methods) return(run_nested_analysis(data, config))
+  if (config$method %in% nested_methods) return(run_nested_analysis(data, config, progress))
   defaults <- list(method = "summary", y = NULL, group = NULL, x = NULL, id = NULL,
     factor2 = NULL, event = NULL, count = NULL, confidence = .95, adjustment = "holm", direction = "decreasing", sphericity = "gg",
     alpha = .05, comparisons = "all", control = NULL, scale = "raw", rout_q = .01,
@@ -442,6 +458,7 @@ run_analysis <- function(data, config) {
   cfg <- modifyList(defaults, config)
   cfg$selected_pairs <- as.character(unlist(cfg$selected_pairs))
   cfg$diagnostic_graphs <- as.character(unlist(cfg$diagnostic_graphs))
+  if (cfg$method %in% t_test_methods) return(run_t_analysis(data, cfg))
   if (cfg$method %in% c("rm_auto", "log_rm_auto")) {
     group <- group_column(data, cfg$group); id <- group_column(data, cfg$id); y <- numeric_column(data, cfg$y)
     coverage <- table(id, group)

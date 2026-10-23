@@ -48,7 +48,7 @@ make_plot <- function(result, style = "points", error = "ci", title = "", x_labe
         sums <- do.call(rbind, lapply(split(d, d$factor2), function(z) {
           s <- summary_table(z$y, z$group, cfg$confidence); s$factor2 <- as.character(z$factor2[1]); s
         }))
-      } else sums <- if (identical(cfg$scale, "log")) result$tables$original_summary else result$tables$summary
+      } else sums <- if (method %in% t_test_methods) summary_table(d$y, d$group, cfg$confidence) else if (identical(cfg$scale, "log")) result$tables$original_summary else result$tables$summary
       sums$low <- if (error == "sd") sums$mean - sums$sd else if (error == "sem") sums$mean - sums$sem else sums$ci_low
       sums$high <- if (error == "sd") sums$mean + sums$sd else if (error == "sem") sums$mean + sums$sem else sums$ci_high
       if (error != "none") p <- p + ggplot2::geom_errorbar(data = sums, ggplot2::aes(x = group, ymin = low, ymax = high), inherit.aes = FALSE, width = .15, color = "#23353D", linewidth = .7)
@@ -147,7 +147,8 @@ normality_plot <- function(result) {
   if (isTRUE(result$nested)) return(result$graphs$assumption_qq)
   d <- result$data; m <- result$method
   if (m %in% c("chisq", "fisher", "survival")) return(NULL)
-  if (m %in% c("paired_t", "paired_wilcox")) {
+  if (!is.null(result$normality_samples)) samples <- result$normality_samples
+  else if (m %in% c("paired_t", "log_paired_t", "paired_wilcox")) {
     v <- split(d$y, d$group); samples <- data.frame(value = v[[1]] - v[[2]], sample = "Within-pair differences")
   } else if (m %in% c("linear", "dose")) samples <- data.frame(value = residuals(result$fit), sample = "Model residuals")
   else if (m %in% c("pearson", "spearman")) samples <- rbind(data.frame(value = d$x, sample = "X"), data.frame(value = d$y, sample = "Y"))
@@ -210,21 +211,37 @@ comparison_plot <- function(result, title = "", x_label = "", y_label = "", poin
   assert(all(c("estimate", "ci_low", "ci_high") %in% names(table)), "This comparison procedure does not supply confidence intervals.")
   ratio <- "geometric_mean_ratio" %in% names(table)
   if (ratio) { table$estimate <- table$geometric_mean_ratio; table$ci_low <- table$ratio_ci_low; table$ci_high <- table$ratio_ci_high }
-  table <- table[is.finite(table$estimate) & is.finite(table$ci_low) & is.finite(table$ci_high), , drop = FALSE]
+  table <- table[is.finite(table$estimate) & !is.na(table$ci_low) & !is.na(table$ci_high), , drop = FALSE]
   assert(nrow(table) > 0, "There are no estimable comparison intervals to plot.")
+  if (result$method %in% multiple_t_methods && identical(result$config$t_test_mode, "endpoints")) table$contrast <- paste(table$test, table$contrast, sep = ": ")
+  table$open_low <- !is.finite(table$ci_low) | (ratio & table$ci_low <= 0)
+  table$open_high <- !is.finite(table$ci_high)
+  # Draw arrows for unbounded one-sided limits rather than discarding the tests.
+  values <- c(table$estimate, table$ci_low[!table$open_low], table$ci_high[!table$open_high])
+  if (ratio) values <- log10(values[values > 0])
+  extent <- range(values[is.finite(values)]); pad <- max(diff(extent) * .15, .1)
+  low <- extent[1] - pad; high <- extent[2] + pad
+  table$ci_low[table$open_low] <- if (ratio) 10^low else low
+  table$ci_high[table$open_high] <- if (ratio) 10^high else high
   if (!"contrast" %in% names(table)) table$contrast <- paste(table$group_1, table$group_2, sep = " minus ")
   table$contrast <- factor(table$contrast, levels = rev(unique(table$contrast)))
   label <- if ("interval" %in% names(table)) unique(table$interval)[1] else paste(result$config$confidence*100, "% simultaneous Tukey")
-  p <- ggplot2::ggplot(table, ggplot2::aes(estimate, contrast)) + ggplot2::geom_vline(xintercept = if (ratio) 1 else 0, linetype = 3) +
-    ggplot2::geom_errorbar(ggplot2::aes(xmin = ci_low, xmax = ci_high), width = .15, orientation = "y") + ggplot2::geom_point(size = point_size, shape = as.numeric(symbol)) +
+  reference <- if (result$method %in% multiple_t_methods) if (ratio) result$config$null_ratio else result$config$null_value else if (ratio) 1 else 0
+  p <- ggplot2::ggplot(table, ggplot2::aes(estimate, contrast)) + ggplot2::geom_vline(xintercept = reference, linetype = 3) +
+    ggplot2::geom_segment(ggplot2::aes(x = ci_low, xend = ci_high, yend = contrast)) +
+    ggplot2::geom_errorbar(data = table[!table$open_low & !table$open_high, , drop = FALSE], ggplot2::aes(xmin = ci_low, xmax = ci_high), width = .15, orientation = "y") +
+    ggplot2::geom_segment(data = table[table$open_low, , drop = FALSE], ggplot2::aes(xend = ci_low, yend = contrast), arrow = grid::arrow(length = grid::unit(.08, "inches"))) +
+    ggplot2::geom_segment(data = table[table$open_high, , drop = FALSE], ggplot2::aes(xend = ci_high, yend = contrast), arrow = grid::arrow(length = grid::unit(.08, "inches"))) +
+    ggplot2::geom_point(size = point_size, shape = as.numeric(symbol)) +
     ggplot2::theme_classic(base_size = 13) + ggplot2::labs(title = if (nzchar(title)) title else paste(label, "confidence intervals"),
+      caption = if (any(table$open_low | table$open_high)) "Arrows mark unbounded confidence limits; the displayed endpoints are not finite bounds." else NULL,
       x = if (nzchar(x_label)) x_label else if (ratio) "Ratio of geometric means" else "Difference between group means", y = if (nzchar(y_label)) y_label else NULL)
   if (ratio) p <- p + ggplot2::scale_x_log10()
   p
 }
 
 graph_kinds <- c("Data graph" = "raw", "Normal QQ (columns)" = "normal_qq", "Lognormal QQ (columns)" = "lognormal_qq",
-  "Publication SuperPlot (nested models)" = "publication", "Residual QQ by condition (nested models)" = "condition_residual_qq",
+  "Publication SuperPlot (linear mixed analysis)" = "publication", "Residual QQ by condition (linear mixed analysis)" = "condition_residual_qq",
   "Multiple-comparison intervals" = "comparison", "Residual diagnostic" = "residual", "Assumption QQ (differences / residuals)" = "assumption_qq",
   "Homoscedasticity" = "homoscedasticity", "Residual QQ" = "residual_qq", "Residual heatmap" = "residual_heatmap", "Ranks" = "ranks", "Matched differences" = "differences")
 
@@ -232,10 +249,10 @@ make_graph <- function(result, kind = "raw", options = list()) {
   assert(kind %in% graph_kinds, "Unknown graph type.")
   if (isTRUE(result$nested) && !kind %in% c("normal_qq", "lognormal_qq")) {
     plot <- result$graphs[[kind]]
-    assert(!is.null(plot), "Enable this nested figure in Analysis options before running the analysis.")
+    assert(!is.null(plot), "Enable this linear mixed analysis figure in Analysis options before running the analysis.")
     return(plot)
   }
-  assert(!kind %in% c("publication", "condition_residual_qq"), "This graph requires a nested-model analysis.")
+  assert(!kind %in% c("publication", "condition_residual_qq"), "This graph requires a linear mixed analysis.")
   if (kind == "raw") return(do.call(make_plot, c(list(result = result), options)))
   if (kind == "comparison") return(do.call(comparison_plot, c(list(result = result), options)))
   if (kind %in% c("normal_qq", "lognormal_qq")) return(do.call(distribution_qq_plot, c(list(result = result, lognormal = kind == "lognormal_qq"), options)))
@@ -267,7 +284,7 @@ draw_graph_layout <- function(plots, columns = 2L, title = "") {
 
 overlay_graphs <- function(entries, title = "") {
   assert(length(entries) >= 2, "Select at least two data graphs for an overlay.")
-  assert(!any(vapply(entries, function(e) isTRUE(e$result$nested), logical(1))), "Use separate panels for nested SuperPlots so model means and mouse / slice identities are preserved.")
+  assert(!any(vapply(entries, function(e) isTRUE(e$result$nested), logical(1))), "Use separate panels for linear mixed analysis SuperPlots so model means and mouse / slice identities are preserved.")
   assert(all(vapply(entries, function(e) e$kind == "raw", logical(1))), "Overlays combine data graphs; use a panel layout for QQ, residual, or comparison graphs.")
   xy <- vapply(entries, function(e) e$result$method %in% c("linear", "pearson", "spearman"), logical(1))
   column <- vapply(entries, function(e) all(c("group", "y") %in% names(e$result$data)) && !e$result$method %in% c("survival", "chisq", "fisher", "two_way"), logical(1))

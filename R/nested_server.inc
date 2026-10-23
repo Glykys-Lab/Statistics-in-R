@@ -53,22 +53,22 @@ observeEvent(input$nested_pairs, {
 }, ignoreNULL = FALSE)
 output$nested_report_view <- renderUI({
   r <- result(); if (!isTRUE(r$nested)) return(NULL)
-  tags$details(tags$summary("Full nested-model report: figures, decisions and writing template"),
-    tags$iframe(title = "Nested-model report", srcdoc = nested_html_report(r), sandbox = "allow-scripts", style = "width:100%;height:780px;border:1px solid #cddff1;margin-top:12px"))
+  tags$details(tags$summary("Full linear mixed analysis report: figures, decisions and writing template"),
+    tags$iframe(title = "Linear mixed analysis report", srcdoc = nested_html_report(r), sandbox = "allow-scripts", style = "width:100%;height:780px;border:1px solid #cddff1;margin-top:12px"))
 })
 output$publication_preview <- renderImage({
   # Reuse the generated PNG at its publication aspect ratio instead of stretching
   # a millimetre-sized grid panel to the ordinary plot viewport.
   r <- result(); req(isTRUE(r$nested), identical(input$graph_kind, "publication"))
   bytes <- r$artifacts$nested_analysis_figure.png
-  validate(need(!is.null(bytes), "Enable publication figures and run the nested analysis first."))
+  validate(need(!is.null(bytes), "Enable publication figures and run the linear mixed analysis first."))
   file <- tempfile(fileext = ".png"); writeBin(bytes, file)
   height <- r$publication_dimensions$height
   list(src = file, contentType = "image/png", width = 480, height = round(480*height/r$config$nested$pub_width_mm), alt = "Publication SuperPlot preview")
 }, deleteFile = TRUE)
 output$nested_exports <- renderUI({
   r <- result(); if (!isTRUE(r$nested)) return(NULL)
-  tagList(h4("Nested-model report and publication figures"), div(class = "download-row", downloadButton("download_nested_html", "HTML report"), downloadButton("download_nested_note", "Obsidian Markdown note"), downloadButton("download_nested_bundle", "All tables and figures (ZIP)")))
+  tagList(h4("Linear mixed analysis report and publication figures"), div(class = "download-row", downloadButton("download_nested_html", "HTML report"), downloadButton("download_nested_note", "Obsidian Markdown note"), downloadButton("download_nested_bundle", "All tables and figures (ZIP)")))
 })
 observe({
   r <- saved()$result
@@ -78,13 +78,13 @@ observe({
   if (is.null(selected) || !selected %in% kinds) selected <- "raw"
   updateSelectInput(session, "graph_kind", choices = choices, selected = selected)
 })
-output$download_nested_html <- downloadHandler(filename = "nested_model_report.html", content = function(file) {
+output$download_nested_html <- downloadHandler(filename = "linear_mixed_analysis_report.html", content = function(file) {
   r <- result(); req(isTRUE(r$nested)); writeLines(nested_html_report(r), file, useBytes = TRUE)
 })
-output$download_nested_note <- downloadHandler(filename = "nested_analysis.md", content = function(file) {
+output$download_nested_note <- downloadHandler(filename = "linear_mixed_analysis.md", content = function(file) {
   r <- result(); req(isTRUE(r$nested)); writeLines(r$report_markdown, file, useBytes = TRUE)
 })
-output$download_nested_bundle <- downloadHandler(filename = "nested_analysis.zip", content = function(file) {
+output$download_nested_bundle <- downloadHandler(filename = "linear_mixed_analysis.zip", content = function(file) {
   r <- result(); req(isTRUE(r$nested)); write_nested_bundle(r, file)
 })
 restore_nested_config <- function(cfg) {

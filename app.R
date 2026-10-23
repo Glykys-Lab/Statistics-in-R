@@ -29,13 +29,10 @@ server <- function(input, output, session) {
   source("R/workspace.inc", local = TRUE)
   source("R/options_server.inc", local = TRUE)
   source("R/nested_server.inc", local = TRUE)
-  observeEvent(input$import_data, {
-    updateSelectInput(session, "source", selected = "upload")
-    updateTabsetPanel(session, "tabs", selected = "data")
-  })
   output$distribution_ui <- renderUI({
     choices <- c("Approximately Gaussian (parametric)" = "normal", "Rank-based (nonparametric)" = "rank")
-    if (identical(input$matching, "matched") && identical(input$family, "many")) choices <- c(choices, "Lognormal (analyze log responses)" = "lognormal")
+    if (isTRUE(input$family %in% c("one", "multiple_t"))) choices <- choices[1]
+    if (isTRUE(input$family %in% c("one", "two", "multiple_t")) || (identical(input$matching, "matched") && identical(input$family, "many"))) choices <- c(choices, "Lognormal (analyze log responses)" = "lognormal")
     selected <- pending_preferences()$distribution
     if (is.null(selected)) selected <- isolate(input$distribution)
     if (is.null(selected) || !selected %in% choices) selected <- "normal"
@@ -60,12 +57,14 @@ server <- function(input, output, session) {
   })
   output$demo_ui <- renderUI({
     choices <- switch(input$table_type,
-      column = c("Three independent groups" = "groups", "Matched before / after" = "paired", "Repeated measures with missing values" = "missing"),
+      column = c("Three independent groups" = "groups", "Matched before / after" = "paired", "Repeated measures with missing values" = "missing", "Multiple t-tests across markers" = "multiple_tests"),
       xy = c("XY measurements" = "xy"),
-      nested = c("Repeated cells nested in slices and mice" = "nested_repeated", "Between groups of mice" = "nested_between"),
+      nested = c("Repeated cells within slices and mice" = "nested_repeated", "Between groups of mice" = "nested_between"),
       other = c("Three groups" = "groups", "Matched before / after" = "paired", "XY measurements" = "xy", "Dose-response" = "dose", "Category counts" = "contingency", "Time to event" = "survival", "Two-factor experiment" = "factorial"))
     selectInput("demo", "Example table", choices)
   })
+  # Keep example selection available when the data sheet is hidden.
+  outputOptions(output, "demo_ui", suspendWhenHidden = FALSE)
   observeEvent(input$table_type, {
     layout <- if (identical(input$source, "workspace") && !is.null(opened_table())) opened_table()$layout else if (input$table_type == "column") "wide" else "long"
     updateSelectInput(session, "layout", selected = layout)
@@ -124,6 +123,7 @@ server <- function(input, output, session) {
     if (input$source == "demo") {
       req(input$demo)
       if (input$table_type == "nested") return(nested_demo(identical(input$demo, "nested_between")))
+      if (identical(input$demo, "multiple_tests")) return(multiple_t_demo())
       if (input$table_type == "column") { req(input$demo %in% c("groups", "paired", "missing")); return(column_demo(input$demo)) }
       return(demo_data(input$demo))
     }
@@ -189,9 +189,11 @@ server <- function(input, output, session) {
     tagList(selectInput("wide_columns", "Measurement columns", names(d), selected = if (length(previous) && all(previous %in% numeric)) previous else setdiff(numeric, selected_id), multiple = TRUE),
       selectInput("wide_id", "Subject ID", c("Use row numbers" = "", names(d)), selected = selected_id))
   })
+  # Analysis and restored projects need column selections on other tabs too.
+  outputOptions(output, "wide_ui", suspendWhenHidden = FALSE)
   data <- reactive({
     d <- raw_data()
-    if (identical(input$table_type, "nested")) return(d)
+    if (identical(input$table_type, "nested") || (isTRUE(input$method %in% multiple_t_methods) && identical(input$t_test_mode, "endpoints"))) return(d)
     if (input$table_type != "xy" && input$layout == "wide") {
       req(input$wide_columns)
       tryCatch(wide_to_long(d, input$wide_columns, if (is.null(input$wide_id)) "" else input$wide_id), error = function(e) validate(need(FALSE, conditionMessage(e))))
@@ -201,6 +203,12 @@ server <- function(input, output, session) {
     if (input$source != "demo") return()
     if (input$table_type == "nested") {
       updateRadioButtons(session, "nested_design", selected = if (input$demo == "nested_between") "between" else "repeated")
+      return()
+    }
+    if (identical(input$demo, "multiple_tests")) {
+      updateSelectInput(session, "family", selected = "multiple_t")
+      updateSelectInput(session, "t_test_mode", selected = "endpoints")
+      updateSelectInput(session, "layout", selected = "long")
       return()
     }
     if (input$table_type == "column") {
@@ -214,9 +222,35 @@ server <- function(input, output, session) {
     updateSelectInput(session, "layout", selected = "long")
     updateSelectInput(session, "method", selected = switch(input$demo, groups = "anova", paired = "paired_t", xy = "linear", dose = "dose", contingency = "fisher", survival = "survival", factorial = "two_way"))
   }, ignoreInit = TRUE)
+  observeEvent(list(input$method, input$t_test_mode), {
+    if (isTRUE(input$method %in% multiple_t_methods) && identical(input$t_test_mode, "endpoints")) updateSelectInput(session, "layout", selected = "long")
+  })
+  output$t_hypothesis_help <- renderText({
+    req(input$method %in% t_test_methods)
+    cfg <- current_config(); d <- data()
+    groups <- if (identical(input$group, "")) "All" else levels(group_column(d, input$group))
+    operator <- switch(cfg$alternative, greater = ">", less = "<", "!=")
+    lognormal <- startsWith(cfg$method, "log_")
+    target <- if (lognormal) cfg$null_ratio else cfg$null_value
+    if (cfg$method %in% one_sample_methods) return(paste(if (lognormal) "Geometric mean of" else "Mean of", input_or("one_sample_group", groups[1]), operator, target))
+    pairs <- if (cfg$method %in% multiple_t_methods && identical(cfg$t_test_mode, "columns")) {
+      tryCatch(comparison_pairs(groups, cfg), error = function(e) list())
+    } else list(if (isTRUE(cfg$reverse_comparisons)) rev(groups) else groups)
+    if (!length(pairs)) return("Choose the pairs to test.")
+    comparisons <- vapply(head(pairs, 6L), function(pair) paste(pair, collapse = if (lognormal) " / " else " - "), character(1))
+    paste(if (lognormal) "Geometric-mean ratio:" else "Mean difference:", paste(paste(comparisons, operator, target), collapse = "; "), if (length(pairs) > 6L) paste("and", length(pairs) - 6L, "more comparisons") else "")
+  })
+  output$t_sample_group_ui <- renderUI({
+    req(input$method %in% one_sample_methods)
+    d <- data()
+    groups <- if (identical(input$group, "")) "All" else levels(group_column(d, input$group))
+    previous <- isolate(input$one_sample_group)
+    selectInput("one_sample_group", "Sample to test", groups, selected = if (length(previous) == 1L && previous %in% groups) previous else groups[1])
+  })
+  outputOptions(output, "t_sample_group_ui", suspendWhenHidden = FALSE)
   output$mapping <- renderUI({
     if (identical(input$table_type, "nested")) return(nested_mapping_ui(raw_data(), input))
-    d <- if (input$table_type != "xy" && input$layout == "wide") {
+    d <- if (isTRUE(input$method %in% multiple_t_methods) && identical(input$t_test_mode, "endpoints")) raw_data() else if (input$table_type != "xy" && input$layout == "wide") {
       req(input$wide_columns)
       wide_to_long(base_data(), input$wide_columns, if (is.null(input$wide_id)) "" else input$wide_id)
     } else base_data()
@@ -226,7 +260,16 @@ server <- function(input, output, session) {
     x_selected <- pick(c(isolate(input$x), "concentration", "x", "X", "time"), nums)
     y_selected <- pick(c(isolate(input$y), if (m == "survival") "time" else c("response", "value", "y", "Y")), if (xy_method) setdiff(nums, x_selected) else nums)
     y <- selectInput("y", if (m == "survival") "Time" else "Response / Y", nums, selected = y_selected)
-    g <- selectInput("group", if (m %in% c("chisq", "fisher")) "Row category" else "Group / condition", if (m == "summary") c("All observations" = "", n) else n, selected = pick(c("group", "condition", "treatment"), n))
+    group_selected <- pick(c(isolate(input$group), "group", "condition", "treatment"), n)
+    g <- selectInput("group", if (m %in% c("chisq", "fisher")) "Row category" else "Group / condition", if (m == "summary" || m %in% one_sample_methods) c("All observations" = "", n) else n, selected = group_selected)
+    if (m %in% t_test_methods) {
+      paired <- m %in% c("paired_t", "log_paired_t") || (m %in% multiple_t_methods && identical(input$matching, "matched"))
+      endpoint <- m %in% multiple_t_methods && identical(input$t_test_mode, "endpoints")
+      return(tagList(y, g,
+        if (m %in% one_sample_methods) uiOutput("t_sample_group_ui"),
+        if (endpoint) selectInput("test_column", "Marker / time-point column", setdiff(n, c(y_selected, group_selected)), selected = pick(c(isolate(input$test_column), "endpoint", "marker", "timepoint", "time"), setdiff(n, c(y_selected, group_selected)))),
+        if (paired) selectInput("id", "Matched subject ID", setdiff(n, c(y_selected, group_selected)), selected = pick(c(isolate(input$id), "subject", "Subject", "id"), setdiff(n, c(y_selected, group_selected))))))
+    }
     if (m %in% c("chisq", "fisher")) return(tagList(g, selectInput("factor2", "Column category", n, selected = pick(c("outcome", "category"), setdiff(n, pick("group", n)))), selectInput("count", "Cell count", nums, selected = pick("count", nums))))
     if (xy_method) return(tagList(selectInput("x", if (m == "dose") "Concentration (original scale)" else "X", nums, selected = x_selected), y))
     tagList(y, g,
@@ -234,11 +277,36 @@ server <- function(input, output, session) {
       if (m == "two_way") selectInput("factor2", "Second factor", n, selected = pick(c("sex", "factor2"), setdiff(n, pick("group", n)))),
       if (m == "survival") selectInput("event", "Event indicator (0 / 1)", nums, selected = pick("event", nums)))
   })
+  # Populate column mappings even when Analysis options is hidden so Analyze
+  # can run from the data sheet without requiring a visit to that tab first.
+  outputOptions(output, "mapping", suspendWhenHidden = FALSE)
   config <- reactive(list(method = input$method, y = input$y, group = input$group, x = input$x, id = input$id, factor2 = input$factor2, event = input$event, count = input$count, confidence = as.numeric(input_or("confidence", .95)), adjustment = input_or("adjustment", "sidak"), direction = input$direction, sphericity = input_or("sphericity", "gg"), alpha = input_or("alpha", .05), comparisons = input_or("comparisons", "all"), control = input$control, rout_q = as.numeric(input_or("rout_q", .01))))
   # Track only fields used by the selected method, so hidden controls cannot change results.
   current_config <- reactive({
     z <- config(); m <- z$method; req(length(m) == 1, nzchar(m))
     if (m %in% nested_methods) return(nested_config(input, raw_data()))
+    if (m %in% t_test_methods) {
+      z <- list(method = m, y = input$y, group = input$group, confidence = as.numeric(input_or("confidence", .95)),
+        alpha = input_or("alpha", .05), alternative = input_or("t_alternative", "two.sided"),
+        report_descriptive = isTRUE(input_or("report_descriptive", TRUE)), report_adjusted_p = isTRUE(input_or("report_adjusted_p", TRUE)))
+      if (startsWith(m, "log_")) z$null_ratio <- input_or("t_ratio", 1) else z$null_value <- input_or("t_mu", 0)
+      kind <- t_test_kind(m, list(t_test_kind = if (identical(input$matching, "matched")) "paired_t" else if (identical(input$variance, "equal")) "student" else "welch"))
+      if (kind == "paired_t") z$id <- input$id
+      if (m %in% one_sample_methods && !identical(input$group, "")) z$one_sample_group <- input$one_sample_group
+      if (m %in% multiple_t_methods) {
+        z$t_test_kind <- kind; z$t_test_mode <- input_or("t_test_mode", "endpoints")
+        if (z$t_test_mode == "endpoints") z$test_column <- input$test_column
+        z$comparisons <- if (z$t_test_mode == "endpoints") "all" else input_or("comparisons", "all")
+        if (z$comparisons == "control") z$control <- input$control
+        if (z$comparisons == "selected") z$selected_pairs <- as.character(input$selected_pairs)
+        z$reverse_comparisons <- isTRUE(input$reverse_comparisons)
+        z$adjustment <- if (identical(input$error_control, "none")) "none" else input_or("adjustment", "holm")
+        if (identical(input$error_control, "fdr") && !z$adjustment %in% c("BKY", "BH", "BY")) z$adjustment <- "BH"
+        if (z$adjustment %in% c("BKY", "BH", "BY")) z$fdr_q <- input_or("fdr_q", .05)
+        z$diagnostic_graphs <- if (isTRUE(input_or("graph_comparison", TRUE))) "comparison" else character()
+      }
+      return(z)
+    }
     keys <- c("method", "confidence", "alpha")
     if (m %in% c("chisq", "fisher")) keys <- c(keys, "group", "factor2", "count")
     else if (m %in% c("pearson", "spearman", "linear", "dose")) keys <- c(keys, "x", "y", if (m == "dose") "direction")
@@ -268,22 +336,32 @@ server <- function(input, output, session) {
     # Reject queued repeat clicks before clearing the result or creating saved sheets.
     if (isTRUE(tryCatch(analysis_unchanged(), error = function(e) FALSE))) return()
     saved(NULL); analysis_error(NULL)
+    progress <- NULL
+    update_progress <- function(value = NULL, detail = NULL) {
+      if (!is.null(progress)) progress$set(value = value, detail = detail)
+    }
     tryCatch({
       # req() silently stops reactive outputs, but Analyze needs a visible error.
       if (identical(input$source, "upload")) {
         assert(!is.null(input$file) && nrow(input$file) > 0L,
-          "Choose a CSV, TSV or Excel file using Browse before clicking Analyze.")
-        if (file_is_excel()) assert(isTruthy(input$sheet), "Choose an Excel worksheet before clicking Analyze.")
+          "Choose a CSV, TSV or Excel file using Browse before clicking Run analysis.")
+        if (file_is_excel()) assert(isTruthy(input$sheet), "Choose an Excel worksheet before clicking Run analysis.")
       }
       if (identical(input$source, "paste")) assert(!is.null(pasted()),
-        "Paste a table and click Use pasted table before clicking Analyze.")
+        "Paste a table and click Use pasted table before clicking Run analysis.")
       if (identical(input$source, "workspace")) assert(!is.null(opened_table()),
-        "Open a saved project table or choose another data source before clicking Analyze.")
+        "Open a saved project table or choose another data source before clicking Run analysis.")
       if (!input$table_type %in% c("xy", "nested") && identical(input$layout, "wide")) assert(isTruthy(input$wide_columns),
         "Select the measurement columns to analyze.")
       d <- data(); cfg <- current_config()
       if (input$table_type == "column" && input$family == "many") assert(nlevels(group_column(d, cfg$group)) >= 3, "Select at least three group columns, or choose the two-group comparison.")
-      res <- if (cfg$method %in% nested_methods) withProgress(message = "Fitting nested models and preparing reports", value = .15, run_analysis(d, cfg)) else run_analysis(d, cfg)
+      if (cfg$method %in% nested_methods) {
+        progress <- shiny::Progress$new(session, style = "notification")
+        progress$set(message = "Running linear mixed analysis", value = 0,
+          detail = "Starting analysis; progress follows completed stages")
+      }
+      res <- run_analysis(d, cfg, progress = update_progress)
+      update_progress(.95, "Saving analysis and preparing graph sheets")
       table_id <- save_current_table()
       p <- project(); name <- paste(names(analysis_methods)[match(res$method, analysis_methods)], "of", p$tables[[table_id]]$name)
       added <- project_add(p, "analyses", list(name = name, table_id = table_id, worksheet = p$tables[[table_id]], result = res, input_data = d, config = cfg, time = as.character(Sys.time())))
@@ -304,18 +382,21 @@ server <- function(input, output, session) {
       updateTextInput(session, "analysis_name", value = name)
       updateSelectInput(session, "graph_kind", selected = "raw")
       updateTabsetPanel(session, "tabs", selected = "results")
+      update_progress(1, "Analysis complete")
     }, error = function(e) {
       message <- trimws(conditionMessage(e))
-      if (!nzchar(message)) message <- "Select a data table and complete the analysis settings before clicking Analyze."
+      if (!nzchar(message)) message <- "Select a data table and complete the analysis settings before clicking Run analysis."
       analysis_error(message)
       showNotification(message, id = "analysis-error", type = "error", duration = NULL)
+    }, finally = {
+      if (!is.null(progress)) progress$close()
     })
   })
   output$method_help <- renderText(method_note(input$method))
-  output$sheet_title <- renderText(if (identical(input$source, "workspace")) opened_table()$name else switch(input$table_type, column = "Column data table", xy = "XY data table", nested = "Nested-model data table", "Data table"))
+  output$sheet_title <- renderText(if (identical(input$source, "workspace")) opened_table()$name else switch(input$table_type, column = "Column data table", xy = "XY data table", nested = "Linear mixed analysis data table", "Data table"))
   output$data_info <- renderText(paste(nrow(raw_data()), "rows |", ncol(raw_data()), "columns"))
   output$table_help <- renderUI({
-    if (identical(input$table_type, "nested")) return(p("Repeated models: one row per Mouse / Slice / Cell and one numeric column per condition. Between-group models: Mouse, Slice, Cell, Condition and a numeric measurement column. ID combinations identify the nested units; IDs must be present even when a measurement is blank. Blank measurements are omitted individually."))
+    if (identical(input$table_type, "nested")) return(p("Repeated models: one row per Mouse / Slice / Cell and one numeric column per condition. Between-group models: Mouse, Slice, Cell, Condition and a numeric measurement column. ID combinations identify cells within slices and mice; IDs must be present even when a measurement is blank. Blank measurements are omitted individually."))
     if (input$table_type == "xy") p("Enter X in one numeric column and Y in another. Choose simple linear regression, Pearson correlation, or Spearman correlation. If you have several Y columns, select the one to analyze.")
     else p("Each measurement column is a group or condition. For matched data, values in the same row belong to the same subject. For independent data, rows do not imply matching. Subject IDs are optional in wide tables. Missing values are audited; complete-case matched tests exclude incomplete subjects, while mixed-effects analysis retains their observed values.")
   })
@@ -327,14 +408,10 @@ server <- function(input, output, session) {
         class = "worksheet-cell", type = "text", value = if (is.na(d[i, j])) "" else as.character(d[i, j]),
         `data-row` = i, `data-column` = j, `data-revision` = revision, `aria-label` = paste(names(d)[j], "row", i))))))))
   })
-  for (pair in list(c("show_data", "data"), c("show_results", "results"), c("show_graph", "figure"), c("nav_data", "data"), c("nav_results", "results"), c("nav_graph", "figure"))) local({
-    button <- pair[1]; tab <- pair[2]
-    observeEvent(input[[button]], updateTabsetPanel(session, "tabs", selected = tab))
-  })
   output$preview <- renderTable(head(data(), 100), striped = TRUE, bordered = FALSE, spacing = "s")
   output$status <- renderUI({
     if (is.null(saved()) && !is.null(analysis_error())) return(div(class = "status-bar stale", role = "alert", analysis_error()))
-    if (is.null(saved())) return(div(class = "status-bar", span(class = "status-dot"), "Data worksheet", span(class = "status-detail", "Enter data and click Analyze")))
+    if (is.null(saved())) return(div(class = "status-bar", span(class = "status-dot"), "Data worksheet", span(class = "status-detail", "Choose Analysis to run calculations")))
     if (!is_current()) return(div(class = "status-bar stale", "Settings changed \u2014 run the analysis again."))
     a <- result()$tables$data_audit
     div(class = "status-bar", span(class = "status-dot"), if (archive_view()) "Saved analysis snapshot" else "Analysis complete", span(class = "status-detail", paste(a$used_rows, if (isTRUE(result()$nested)) "measurements used /" else "rows used /", a$excluded_rows, "excluded")))
@@ -386,7 +463,7 @@ server <- function(input, output, session) {
   output$download_script <- downloadHandler(filename = "reproduce_analysis.R", content = function(file) { result(); writeLines(reproduction_script(saved()$input_data, modifyList(saved()$config, display_options()), plot_options(), if (is.null(input$graph_kind)) "raw" else input$graph_kind, saved()$worksheet), file) })
   output$download_session <- downloadHandler(filename = "session_info.txt", content = function(file) writeLines(capture.output(sessionInfo()), file))
   output$download_png <- downloadHandler(filename = "figure.png", content = function(file) save_result_figure(result(), input$graph_kind, figure(), file, "png"))
-  output$download_pdf <- downloadHandler(filename = "figure.pdf", content = function(file) save_result_figure(result(), input$graph_kind, figure(), file, "pdf"))
+  output$download_svg <- downloadHandler(filename = "figure.svg", content = function(file) save_result_figure(result(), input$graph_kind, figure(), file, "svg"))
 }
 
 shinyApp(ui, server)

@@ -156,8 +156,9 @@ check(TRUE, "Repeated/mixed residual and normal QQ figures render")
 
 # Nested models use hierarchical fixtures in nested_tests.R.
 for (method in setdiff(unname(analysis_methods), nested_methods)) {
-  name <- if (method %in% c("welch", "student", "paired_t", "mann_whitney", "paired_wilcox")) "paired" else if (method %in% c("pearson", "spearman", "linear")) "xy" else if (method %in% c("chisq", "fisher")) "contingency" else if (method == "two_way") "factorial" else if (method %in% c("dose", "survival")) method else "groups"
+  name <- if (method %in% c("welch", "student", "paired_t", "log_welch", "log_student", "log_paired_t", "mann_whitney", "paired_wilcox")) "paired" else if (method %in% c("pearson", "spearman", "linear")) "xy" else if (method %in% c("chisq", "fisher")) "contingency" else if (method == "two_way") "factorial" else if (method %in% c("dose", "survival")) method else "groups"
   config <- list(method = method, y = if (method == "survival") "time" else "response", group = "group", x = "concentration", id = "subject", event = "event", count = "count", factor2 = if (method == "two_way") "sex" else "outcome")
+  if (method %in% one_sample_methods) config$one_sample_group <- unique(demo_data(name)$group)[1]
   result <- run_analysis(demo_data(name), config)
   ggplot2::ggsave(file.path("artifacts", paste0(method, ".png")), make_plot(result), width = 7, height = 5, dpi = 100)
   check(file.exists(file.path("artifacts", paste0(method, ".png"))), paste("Figure renders:", method))
@@ -180,6 +181,7 @@ for (config in list(rm_cfg, mixed_cfg)) {
   env <- new.env(parent = globalenv()); sys.source(script_path, envir = env); setwd(old)
   check(near(env$result$tables$test$p_value, run_analysis(rm_missing, config)$tables$test$p_value), paste("Standalone export reproduces", config$method))
 }
+source("tests/t_tests.R", encoding = "UTF-8")
 source("tests/project_tests.R", encoding = "UTF-8")
 source("tests/options_tests.R", encoding = "UTF-8")
 source("tests/results_tests.R", encoding = "UTF-8")

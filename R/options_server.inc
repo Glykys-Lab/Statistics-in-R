@@ -29,6 +29,7 @@ advanced_config <- reactive({
 })
 output$comparison_family_ui <- renderUI({
   choices <- c("None: no follow-up comparisons" = "none", "Every pair of columns" = "all", "Each column versus a control" = "control", "Selected pairs of columns" = "selected")
+  if (isTRUE(input$method %in% multiple_t_methods)) choices <- choices[names(choices) != "None: no follow-up comparisons"]
   can_trend <- identical(input$method, "anova") || (input$method %in% repeated_methods && identical(input$sphericity, "none"))
   if (can_trend) choices <- c(choices, "Linear trend across column positions" = "trend")
   previous <- pending_preferences()$comparisons
@@ -36,19 +37,40 @@ output$comparison_family_ui <- renderUI({
   if (is.null(previous) || !previous %in% choices) previous <- "all"
   tagList(radioButtons("comparisons", "Follow-up tests", choices, selected = previous), if (!can_trend) p(class = "hint", "Linear trend requires ordinary ANOVA, or repeated parametric analysis with sphericity assumed."))
 })
+# Keep comparison choices valid even before their settings tab is visited.
+outputOptions(output, "comparison_family_ui", suspendWhenHidden = FALSE)
 output$selected_pairs_ui <- renderUI({
   d <- data(); req(input$group %in% names(d)); groups <- levels(group_column(d, input$group)); req(length(groups) >= 2)
   pairs <- combn(groups, 2, simplify = FALSE)
   values <- vapply(pairs, function(p) paste(vapply(p, utils::URLencode, character(1), reserved = TRUE), collapse = "::"), character(1))
   selectInput("selected_pairs", "Pairs to compare", setNames(values, vapply(pairs, paste, character(1), collapse = " versus ")), selected = intersect(isolate(input$selected_pairs), values), multiple = TRUE)
 })
-output$analysis_plan <- renderText({ m <- input$method; req(m); paste(names(analysis_methods)[match(m, analysis_methods)], "\n", method_note(m), "\nFollow-up comparisons:", input_or("comparisons", "all"), "\nCorrection:", input_or("adjustment", "sidak")) })
-observeEvent(input$show_options, updateTabsetPanel(session, "tabs", selected = "options"))
+observeEvent(list(input$method, input$t_test_mode), {
+  req(length(input$method) == 1L)
+  ttest <- input$method %in% t_test_methods
+  if (ttest) {
+    hideTab("analysis_option_tabs", "repeated", session = session)
+    hideTab("analysis_option_tabs", "residuals", session = session)
+  } else {
+    showTab("analysis_option_tabs", "repeated", session = session)
+    showTab("analysis_option_tabs", "residuals", session = session)
+  }
+  comparisons <- !ttest || (input$method %in% multiple_t_methods && identical(input$t_test_mode, "columns"))
+  if (comparisons) showTab("analysis_option_tabs", "comparisons", session = session) else hideTab("analysis_option_tabs", "comparisons", session = session)
+  if (ttest && (isTRUE(input$analysis_option_tabs %in% c("repeated", "residuals")) || (!comparisons && identical(input$analysis_option_tabs, "comparisons")))) updateTabsetPanel(session, "analysis_option_tabs", selected = "design")
+})
+output$analysis_plan <- renderText({
+  m <- input$method; req(m)
+  if (m %in% t_test_methods) return(paste(names(analysis_methods)[match(m, analysis_methods)], method_note(m),
+    paste("Hypothesis:", input_or("t_alternative", "two.sided")),
+    if (m %in% multiple_t_methods) paste("Correction:", if (identical(input$error_control, "none")) "none" else input_or("adjustment", "holm")), sep = "\n"))
+  paste(names(analysis_methods)[match(m, analysis_methods)], "\n", method_note(m), "\nFollow-up comparisons:", input_or("comparisons", "all"), "\nCorrection:", input_or("adjustment", "sidak"))
+})
 observeEvent(input$alpha, { req(is.finite(input$alpha), input$alpha > 0, input$alpha < 1); value <- 1 - input$alpha; choices <- sort(unique(c(.90, .95, .99, value))); updateSelectInput(session, "confidence", choices = setNames(choices, paste0(format(100*choices, trim = TRUE), "%")), selected = value) }, ignoreInit = TRUE)
 observeEvent(input$confidence, { value <- suppressWarnings(as.numeric(input$confidence)); req(length(value) == 1, is.finite(value), value > 0, value < 1); updateNumericInput(session, "alpha", value = 1 - value) }, ignoreInit = TRUE)
 display_options <- reactive(list(output_digits = as.integer(input_or("output_digits", 4L)), p_style = input_or("p_style", "prism"), p_digits = as.integer(input_or("p_digits", 6L))))
 display_tables <- reactive(visible_result_tables(result()))
-preference_choices <- list(matching = c("independent", "matched"), distribution = c("normal", "lognormal", "rank"), variance = c("unequal", "equal"), repeated = c("complete", "mixed", "auto"), sphericity = c("gg", "none"), random_effect = c("remove", "full", "keep"), comparisons = c("none", "all", "control", "selected", "trend"), error_control = c("fwer", "fdr", "none"), adjustment = c("sidak", "holm_sidak", "bonferroni", "holm", "tukey", "BKY", "BH", "BY", "none"), rank_test = c("dunn", "wilcox"), p_style = c("prism", "decimal", "scientific", "stars"))
+preference_choices <- list(t_alternative = c("two.sided", "greater", "less"), t_test_mode = c("endpoints", "columns"), matching = c("independent", "matched"), distribution = c("normal", "lognormal", "rank"), variance = c("unequal", "equal"), repeated = c("complete", "mixed", "auto"), sphericity = c("gg", "none"), random_effect = c("remove", "full", "keep"), comparisons = c("none", "all", "control", "selected", "trend"), error_control = c("fwer", "fdr", "none"), adjustment = c("sidak", "holm_sidak", "bonferroni", "holm", "tukey", "BKY", "BH", "BY", "none"), rank_test = c("dunn", "wilcox"), p_style = c("prism", "decimal", "scientific", "stars"))
 preference_numbers <- list(alpha = c(.001, .2), confidence = c(.8, .999), fdr_q = c(.001, .5), output_digits = c(2, 12), p_digits = c(1, 15))
 preference_checks <- c("glm_initial", "reverse_comparisons", "report_adjusted_p", "report_descriptive", "report_goodness", "report_effects", "report_aicc", "graph_comparison", "graph_ranks", "graph_differences", "graph_residual", "graph_homoscedasticity", "graph_residual_qq", "graph_residual_heatmap", "residual_normality", "residual_variance")
 preferences <- reactiveVal(list())
@@ -64,7 +86,7 @@ restore_preferences <- function(values) {
     if (id %in% preference_checks && !is.logical(value)) next
     accepted[[id]] <- value
     if (id %in% preference_checks) updateCheckboxInput(session, id, value = value)
-    else if (id %in% c("matching", "distribution", "repeated", "random_effect", "comparisons", "error_control")) updateRadioButtons(session, id, selected = value)
+    else if (id %in% c("matching", "distribution", "repeated", "random_effect", "comparisons", "error_control", "t_alternative")) updateRadioButtons(session, id, selected = value)
     else if (id %in% setdiff(names(preference_numbers), "confidence")) updateNumericInput(session, id, value = value)
     else updateSelectInput(session, id, selected = value)
   }
@@ -84,7 +106,7 @@ observeEvent(input$save_analysis_defaults, {
   session$sendCustomMessage("analysis-defaults", list(values = values)); showNotification("Analysis defaults saved in this browser.")
 })
 observeEvent(input$reset_analysis_defaults, {
-  values <- list(matching = "independent", distribution = "normal", variance = "unequal", repeated = "auto", sphericity = "gg", random_effect = "remove", glm_initial = TRUE, comparisons = "all", error_control = "fwer", adjustment = "sidak", alpha = .05, confidence = .95, fdr_q = .05, reverse_comparisons = FALSE, report_adjusted_p = TRUE, report_descriptive = TRUE, rank_test = "dunn", output_digits = 4, p_style = "prism", p_digits = 6)
+  values <- list(t_alternative = "two.sided", t_test_mode = "endpoints", matching = "independent", distribution = "normal", variance = "unequal", repeated = "auto", sphericity = "gg", random_effect = "remove", glm_initial = TRUE, comparisons = "all", error_control = "fwer", adjustment = "sidak", alpha = .05, confidence = .95, fdr_q = .05, reverse_comparisons = FALSE, report_adjusted_p = TRUE, report_descriptive = TRUE, rank_test = "dunn", output_digits = 4, p_style = "prism", p_digits = 6)
   for (id in setdiff(preference_checks, names(values))) values[[id]] <- identical(id, "graph_comparison")
   restore_preferences(values); session$sendCustomMessage("analysis-defaults", list(clear = TRUE)); showNotification("Analysis defaults reset.")
 })

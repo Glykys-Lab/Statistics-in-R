@@ -20,6 +20,8 @@
 # ==============================================================================
 
 # 1. Packages ------------------------------------------------------------------
+# Optional app callback; direct execution keeps the reference independent of Shiny.
+report_progress <- if (exists("labstats_progress", mode = "function")) labstats_progress else function(value = NULL, detail = NULL) NULL
 # Loaded quietly: the "masked from" and welcome messages are expected and
 # harmless (lmerTest's lmer is meant to replace lme4's, and adds p-values).
 # Real problems still show: errors, and warnings such as convergence.
@@ -519,6 +521,7 @@ multi       <- nlevels(df_long$Condition) >= 2
 cond_levels <- levels(df_long$Condition)
 
 # 5b. Outliers (ROUT) ------------------------------------------------------------
+report_progress(.15, "Checking outliers and fitting the screening model if needed")
 # ROUT (Motulsky & Brown 2006): (1) a robust fit that outliers barely pull on --
 # here a robust centre (Lorentzian / Cauchy M-estimate); (2) the robust SD of
 # the residuals (RSDR = 68.27th percentile of |residual|, scaled by n/(n-1));
@@ -774,6 +777,7 @@ fit_warnings <- character(0)
 fit_lmer <- function(sc) {
   label <- paste0("Model ", c(none = "A", shared = "C", per_condition = "E")[[sc]],
                   " (lmer, slice x condition: ", sc, ")")
+  report_progress(detail = paste("Fitting", label, "- this stage can take several minutes"))
   tryCatch(
     withCallingHandlers(
       # do.call() makes summary() print the actual formula.
@@ -815,6 +819,8 @@ nlme_random <- function(sc) {
 fixed_formula <- as.formula(paste("Response ~", fixed_part))
 
 fit_lme <- function(sc, variance_per_condition) {
+  report_progress(detail = paste("Fitting nlme model with", sc, "slice x condition SD and",
+    if (variance_per_condition) "separate residual SDs" else "shared residual SD", "- this stage can take several minutes"))
   w <- if (variance_per_condition) quote(nlme::varIdent(form = ~ 1 | Condition)) else NULL
   tryCatch(
     eval(bquote(nlme::lme(fixed = .(fixed_formula), random = .(nlme_random(sc)),
@@ -849,6 +855,7 @@ fit_row <- function(label, m) {
 }
 
 # 7. Choose the variance structure ---------------------------------------------
+report_progress(.3, "Fitting candidate models and comparing slice variability")
 sc_labels <- c(none = "No slice x condition", shared = "Slice x condition, shared SD",
                per_condition = "Slice x condition, SD per condition")
 
@@ -894,6 +901,7 @@ if (is.null(model_lmer)) {
 
 # 7b. Cell-level (residual) variance: shared vs per condition (fitted with nlme,
 #     using the slice x condition structure chosen above).
+report_progress(.45, "Comparing shared and separate residual variability")
 m_equal <- m_hetero <- variance_test <- NULL
 variance_p <- NA
 
@@ -939,6 +947,7 @@ model_desc <- paste0(
 )
 
 # 8. Results tables ------------------------------------------------------------
+report_progress(.6, "Calculating model means, comparisons and degrees of freedom")
 # All estimates are back-transformed to the ORIGINAL scale, so a log-transformed
 # analysis reports geometric means and RATIOS instead of log10 values.
 back           <- if (log_transform) function(x) 10^x else function(x) x
@@ -1674,6 +1683,7 @@ caution_text <- c(
 )
 
 # 9. Plot ----------------------------------------------------------------------
+report_progress(.7, "Creating figures and diagnostics")
 # Coloured points/lines = individual cells (lines join the same cell across
 # conditions, colours = mouse). Black marker + bars = summary_display.
 #
@@ -2386,6 +2396,7 @@ normality_header <- c("Condition", "n",
                       "[[D'Agostino-Pearson K2 omnibus\\|DAgo K2]]", "[[D'Agostino-Pearson K2 omnibus\\|DAgo p]]")
 
 # 11. Save ---------------------------------------------------------------------
+report_progress(.8, "Rendering figures and writing reports")
 if (save_outputs) {
   
   dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
@@ -2425,7 +2436,7 @@ if (save_outputs) {
     "Sample_Size_N:",
     sample_size_lines,
     paste0("Normality: ", if (log_transform) "Log transformed" else "Normal"),
-    "Analysis_Test: Nested mixed-effects model",
+    "Analysis_Test: Linear mixed analysis",
     paste0('Model: "', model_letter, " (", if (engine_used == "nlme") "nlme" else "lmer", "): ",
            models_tbl$Assumes[models_tbl$Model == model_letter], '"'),
     paste0("Slice_x_Condition: ", slice_desc),

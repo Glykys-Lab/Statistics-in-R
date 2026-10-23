@@ -55,6 +55,18 @@ h4 { font-size: 15px; font-weight: 650; margin: 19px 0 12px; }
 .shiny-output-error-validation { color: #926b32; font-size: 13px; padding: 16px; }
 .shiny-notification { border-radius: 9px; padding: 18px; }
 #shiny-notification-panel { width: min(480px, 90vw); }
+/* Progress titles and model details need separate, wrapping lines. */
+.shiny-progress-notification .progress-message,
+.shiny-progress-notification .progress-detail { display: block; white-space: normal; overflow-wrap: anywhere; }
+.shiny-progress-notification .progress-message { margin-bottom: 6px; }
+.shiny-progress-notification .progress-detail { font-size: 12px; line-height: 1.5; }
+.shiny-progress-notification .progress-bar {
+  background-image: linear-gradient(45deg, #ffffff33 25%, transparent 25%, transparent 50%, #ffffff33 50%, #ffffff33 75%, transparent 75%);
+  background-size: 20px 20px;
+  animation: analysis-progress 1s linear infinite;
+}
+@keyframes analysis-progress { to { background-position: 20px 0; } }
+@media (prefers-reduced-motion: reduce) { .shiny-progress-notification .progress-bar { animation: none; } }
 @media (max-width: 1000px) { .brand-tag { display: none; } .container-fluid { padding: 0 18px 20px; } .tab-body { padding: 20px; } .status-detail { display: none; } .controls { padding: 18px 13px; } }
 @media (max-width: 767px) { .controls { margin-bottom: 20px; } .feature { min-height: auto; margin: 8px 0; } .footer-note span { display: none; } .hero { padding: 24px 0; } .local-badge { font-size: 8px; } }
 
@@ -166,4 +178,27 @@ h4 { font-size: 15px; font-weight: 650; margin: 19px 0 12px; }
   .workspace-row > .col-sm-3 > .controls {
     flex: 1; width: 100%; min-height: calc(100vh - 152px); max-height: none;
   }
+}
+
+/* One workspace navigation row; actions stay with their content. */
+.topbar { gap: 18px; flex-wrap: wrap; margin-bottom: 16px; }
+.workspace-status { flex: 1; min-width: 160px; }
+.topbar .status-bar { background: transparent; border: 0; border-radius: 0; padding: 0; margin: 0; flex-wrap: wrap; gap: 8px; font-weight: 500; }
+.topbar .status-detail { margin-left: 0; }
+.topbar .stale { color: #8d6323; }
+.project-menu { position: relative; margin-left: auto; }
+.project-menu > summary { margin: 0; padding: 8px 14px; border: 1px solid #c7d3e1; border-radius: 4px; background: #fff; color: #365c85; cursor: pointer; }
+.project-menu-content { position: absolute; right: 0; top: calc(100% + 8px); z-index: 1050; width: min(310px, calc(100vw - 32px)); padding: 16px; background: #fff; border: 1px solid #cdd7e3; border-radius: 5px; box-shadow: 0 6px 20px #25364a20; }
+.project-menu-action { display: block; width: 100%; text-align: left; margin-bottom: 10px; }
+.project-menu-content .shiny-input-container { width: 100%; }
+.project-menu-content .hint { margin-bottom: 0; }
+.analysis-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 18px; }
+.analysis-heading h3 { margin: 0; }
+.analysis-heading .btn { padding: 10px 18px; }
+.result-exports { margin-top: 24px; padding-top: 10px; border-top: 1px solid #dde6e8; }
+.main-panel > .tabbable > .nav-tabs { gap: 0; }
+.main-panel > .tabbable > .nav-tabs .nav-link { padding: 13px 16px; }
+@media (max-width: 767px) {
+  .workspace-status { order: 3; flex-basis: 100%; }
+  .main-panel > .tabbable > .nav-tabs .nav-link { padding: 12px 10px; }
 }
